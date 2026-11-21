@@ -12,6 +12,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     @Published var points: [TrackPoint] = []
     @Published var isRecording = false
+    @Published var isPaused = false
     @Published var trips: [Trip] = []
     @Published var denied = false
     @Published var error: String?
@@ -22,6 +23,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     private var file: FileHandle?
     private var fileURL: URL?
     private var startedAt = Date.distantPast
+    private var segment = 0
 
     override init() {
         super.init()
@@ -49,8 +51,24 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         error = nil
         startedAt = Date()
         isRecording = true
+        isPaused = false
+        segment = 0
         UIApplication.shared.isIdleTimerDisabled = true // keep the screen on in the car
         manager.requestWhenInUseAuthorization()
+        manager.startUpdatingLocation()
+    }
+
+    func pause() {
+        guard isRecording, !isPaused else { return }
+        manager.stopUpdatingLocation()
+        isPaused = true
+    }
+
+    func resume() {
+        guard isRecording, isPaused else { return }
+        segment += 1
+        startedAt = Date() // again skip the cached fix from before the pause
+        isPaused = false
         manager.startUpdatingLocation()
     }
 
@@ -59,6 +77,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         try? file?.close()
         file = nil
         isRecording = false
+        isPaused = false
         UIApplication.shared.isIdleTimerDisabled = false
         if points.isEmpty, let fileURL { try? FileManager.default.removeItem(at: fileURL) }
         loadTrips()
@@ -85,7 +104,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     // MARK: CLLocationManagerDelegate
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard isRecording, let file else { return }
+        guard isRecording, !isPaused, let file else { return }
         // CoreLocation first hands over its cached fix, which can be hours old: skip anything from before Start.
         for loc in locations where loc.timestamp >= startedAt && loc.horizontalAccuracy >= 0 && loc.horizontalAccuracy <= Self.maxHorizontalAccuracy {
             let p = TrackPoint(t: loc.timestamp,
@@ -94,7 +113,8 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
                                alt: loc.altitude,
                                speed: loc.speed >= 0 ? loc.speed : nil,
                                course: loc.course >= 0 ? loc.course : nil,
-                               hAcc: loc.horizontalAccuracy)
+                               hAcc: loc.horizontalAccuracy,
+                               seg: segment == 0 ? nil : segment)
             // Appended to disk right away: if iOS kills the app mid-drive, the trip so far is kept.
             do {
                 var line = try encoder.encode(p)
@@ -110,7 +130,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
         denied = status == .denied || status == .restricted
-        if isRecording && (status == .authorizedWhenInUse || status == .authorizedAlways) {
+        if isRecording && !isPaused && (status == .authorizedWhenInUse || status == .authorizedAlways) {
             manager.startUpdatingLocation()
         }
     }

@@ -10,6 +10,7 @@ struct TrackPoint: Codable {
     var speed: Double?   // m/s; nil when GPS reported it invalid
     var course: Double?  // degrees; nil when invalid
     var hAcc: Double     // horizontal accuracy, metres
+    var seg: Int? = nil  // bumped on every resume after a pause; nil = first segment
 }
 
 /// Below this speed a segment counts as standing still: GPS jitter at a red light
@@ -34,14 +35,15 @@ struct TripStats {
     var avgMovingSpeed: Double { movingTime > 0 ? distance / movingTime : 0 }
 
     init(_ p: [TrackPoint]) {
-        guard let first = p.first, let last = p.last else { return }
-        duration = last.t.timeIntervalSince(first.t)
+        guard !p.isEmpty else { return }
         minAlt = p.map(\.alt).min() ?? 0
         maxAlt = p.map(\.alt).max() ?? 0
         maxSpeed = p.compactMap(\.speed).max() ?? 0
         for (a, b) in zip(p, p.dropFirst()) {
             let d = haversine(a, b), dt = b.t.timeIntervalSince(a.t)
-            guard dt > 0 else { continue }
+            // A pause sits between two segments: it adds neither distance nor time.
+            guard dt > 0, a.seg == b.seg else { continue }
+            duration += dt
             if (b.speed ?? d / dt) > movingSpeedThreshold {
                 distance += d
                 movingTime += dt
@@ -80,6 +82,30 @@ func gpx(_ points: [TrackPoint]) -> String {
         s += "</trkpt>\n"
     }
     return s + "</trkseg></trk>\n</gpx>\n"
+}
+
+/// Consecutive slices of a track for a speed-coloured map line.
+/// `fraction` is the slice's average speed relative to the trip's top speed (0...1).
+struct SpeedChunk: Identifiable {
+    let id: Int
+    let range: ClosedRange<Int>
+    let fraction: Double
+}
+
+func speedChunks(_ p: [TrackPoint], maxChunks: Int = 60) -> [SpeedChunk] {
+    guard p.count > 1, maxChunks > 0 else { return [] }
+    let top = p.compactMap(\.speed).max() ?? 0
+    let step = max(1, (p.count - 1 + maxChunks - 1) / maxChunks)
+    var chunks: [SpeedChunk] = []
+    var start = 0
+    while start < p.count - 1 {
+        let end = min(start + step, p.count - 1)
+        let v = p[start...end].compactMap(\.speed)
+        let avg = v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count)
+        chunks.append(SpeedChunk(id: chunks.count, range: start...end, fraction: top > 0 ? min(1, avg / top) : 0))
+        start = end
+    }
+    return chunks
 }
 
 func csv(_ points: [TrackPoint]) -> String {

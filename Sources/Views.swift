@@ -56,7 +56,7 @@ struct RecordView: View {
                 if let error = recorder.error {
                     Text(error).foregroundStyle(.red)
                 }
-                Text(formatKmh(recorder.points.last?.speed ?? 0))
+                Text(recorder.isPaused ? "Pauza" : formatKmh(recorder.points.last?.speed ?? 0))
                     .font(.system(size: 56, weight: .bold, design: .rounded))
                     .monospacedDigit()
                 HStack {
@@ -70,21 +70,36 @@ struct RecordView: View {
                     Stat(title: "Kierunek", value: courseText)
                     Stat(title: "GPS", value: accuracyText)
                 }
-                Button {
-                    if recorder.isRecording { recorder.stop() } else { recorder.start() }
-                } label: {
-                    Text(recorder.isRecording ? "Stop" : "Start")
-                        .font(.title2.bold())
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                HStack(spacing: 12) {
+                    if recorder.isRecording {
+                        Button {
+                            if recorder.isPaused { recorder.resume() } else { recorder.pause() }
+                        } label: {
+                            Text(recorder.isPaused ? "Wznów" : "Pauza")
+                                .font(.title2.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                    }
+                    Button {
+                        if recorder.isRecording { recorder.stop() } else { recorder.start() }
+                    } label: {
+                        Text(recorder.isRecording ? "Stop" : "Start")
+                            .font(.title2.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(recorder.isRecording ? .red : .green)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(recorder.isRecording ? .red : .green)
             }
             .padding()
             .background(.regularMaterial)
         }
         .onAppear { recorder.requestPermission() }
+        .environment(\.colorScheme, .dark) // easier on the eyes at night in the car
     }
 }
 
@@ -135,12 +150,16 @@ struct TripDetailView: View {
 
     var body: some View {
         let s = trip.stats
+        let chunks = speedChunks(trip.points)
         // Chart gets at most ~300 samples; the map and the files keep every point.
         let samples = stride(from: 0, to: trip.points.count, by: max(1, trip.points.count / 300)).map { trip.points[$0] }
         ScrollView {
             VStack(spacing: 16) {
                 Map(initialPosition: .automatic) {
-                    MapPolyline(coordinates: trip.points.map(\.coordinate)).stroke(.blue, lineWidth: 4)
+                    ForEach(chunks) { chunk in
+                        MapPolyline(coordinates: trip.points[chunk.range].map(\.coordinate))
+                            .stroke(Color(hue: 0.33 * (1 - chunk.fraction), saturation: 0.9, brightness: 0.85), lineWidth: 5)
+                    }
                     if let first = trip.points.first, let last = trip.points.last {
                         Marker("Start", coordinate: first.coordinate).tint(.green)
                         Marker("Koniec", coordinate: last.coordinate).tint(.red)
@@ -160,6 +179,10 @@ struct TripDetailView: View {
                     .padding(8)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                Text("Kolor trasy: zielony – wolno, czerwony – szybko")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Grid(horizontalSpacing: 8, verticalSpacing: 16) {
                     GridRow {
