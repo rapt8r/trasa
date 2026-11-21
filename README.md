@@ -12,8 +12,8 @@ Zainstaluj go przez [Sideloadly](https://sideloadly.io) lub AltStore z darmowym 
 
 ## Dane
 
-Każda trasa to plik `trip-<unix>.jsonl` w Dokumentach aplikacji (widoczny w aplikacji Pliki), jeden punkt GPS na linię,
-dopisywany na bieżąco, więc przerwanie działania aplikacji nie kasuje nagranej części.
+Każda trasa to plik `trip-<unix>.jsonl` w prywatnym katalogu aplikacji (niewidoczny w aplikacji Pliki), jeden punkt GPS na linię,
+dopisywany na bieżąco, więc przerwanie działania aplikacji nie kasuje nagranej części. Na zewnątrz trasa wychodzi tylko przez "Eksport GPX".
 
 ## Test logiki
 

@@ -16,9 +16,6 @@ targets:
         NSLocationWhenInUseUsageDescription: Aplikacja zapisuje trasę przejazdu, także gdy ekran jest wyłączony.
         UIBackgroundModes: [location]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        # Trip files (.jsonl) show up in the Files app under "Trasa"
-        UIFileSharingEnabled: true
-        LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.trasa
