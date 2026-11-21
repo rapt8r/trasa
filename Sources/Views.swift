@@ -37,6 +37,10 @@ struct RecordView: View {
 
     var body: some View {
         let stats = TripStats(recorder.points)
+        let last = recorder.points.last
+        let altitudeText: String = last.map { String(format: "%.0f m", $0.alt) } ?? "–"
+        let courseText: String = last?.course.map { compass($0) } ?? "–"
+        let accuracyText: String = last.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
         Map(position: $camera) {
             UserAnnotation()
             if recorder.points.count > 1 {
@@ -59,6 +63,12 @@ struct RecordView: View {
                     Stat(title: "Dystans", value: formatKm(stats.distance))
                     Stat(title: "Czas", value: formatDuration(stats.duration))
                     Stat(title: "Maks.", value: formatKmh(stats.maxSpeed))
+                }
+                HStack {
+                    Stat(title: "Średnia", value: formatKmh(stats.avgSpeed))
+                    Stat(title: "Wysokość", value: altitudeText)
+                    Stat(title: "Kierunek", value: courseText)
+                    Stat(title: "GPS", value: accuracyText)
                 }
                 Button {
                     if recorder.isRecording { recorder.stop() } else { recorder.start() }
@@ -84,6 +94,13 @@ struct TripListView: View {
     var body: some View {
         NavigationStack {
             List {
+                if !recorder.trips.isEmpty {
+                    HStack {
+                        Stat(title: "Trasy", value: "\(recorder.trips.count)")
+                        Stat(title: "Łącznie", value: formatKm(recorder.trips.reduce(0.0) { $0 + $1.stats.distance }))
+                        Stat(title: "Czas", value: formatDuration(recorder.trips.reduce(0.0) { $0 + $1.stats.duration }))
+                    }
+                }
                 ForEach(recorder.trips) { trip in
                     NavigationLink {
                         TripDetailView(trip: trip)
@@ -113,6 +130,8 @@ struct TripListView: View {
 struct TripDetailView: View {
     let trip: Trip
     @State private var gpxURL: URL?
+    @State private var csvURL: URL?
+    @State private var satellite = false
 
     var body: some View {
         let s = trip.stats
@@ -127,7 +146,19 @@ struct TripDetailView: View {
                         Marker("Koniec", coordinate: last.coordinate).tint(.red)
                     }
                 }
+                .mapStyle(satellite ? MapStyle.hybrid : MapStyle.standard)
                 .frame(height: 320)
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        satellite.toggle()
+                    } label: {
+                        Image(systemName: satellite ? "map" : "globe")
+                            .padding(10)
+                            .background(.regularMaterial, in: Circle())
+                    }
+                    .accessibilityLabel(satellite ? "Mapa" : "Satelita")
+                    .padding(8)
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
 
                 Grid(horizontalSpacing: 8, verticalSpacing: 16) {
@@ -170,14 +201,17 @@ struct TripDetailView: View {
         .navigationTitle(trip.start.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let gpxURL {
-                ShareLink(item: gpxURL) { Label("Eksport GPX", systemImage: "square.and.arrow.up") }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if let csvURL { ShareLink("CSV", item: csvURL) }
+                if let gpxURL { ShareLink("GPX", item: gpxURL) }
             }
         }
         .task {
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(trip.url.deletingPathExtension().lastPathComponent + ".gpx")
-            if (try? gpx(trip.points).write(to: url, atomically: true, encoding: .utf8)) != nil { gpxURL = url }
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent(trip.url.deletingPathExtension().lastPathComponent)
+            let g = base.appendingPathExtension("gpx"), c = base.appendingPathExtension("csv")
+            if (try? gpx(trip.points).write(to: g, atomically: true, encoding: .utf8)) != nil { gpxURL = g }
+            if (try? csv(trip.points).write(to: c, atomically: true, encoding: .utf8)) != nil { csvURL = c }
         }
     }
 }

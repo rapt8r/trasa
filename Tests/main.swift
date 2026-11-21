@@ -38,4 +38,9 @@ precondition(g.contains("<trkpt lat=\"52.001\" lon=\"21.0\">") && g.contains("<t
 precondition(g.components(separatedBy: "<trkpt").count == 4)
 
 precondition(formatDuration(3725) == "1:02:05" && formatKm(12345) == "12.35 km" && formatKmh(10) == "36 km/h")
+precondition(compass(0) == "N" && compass(359) == "N" && compass(45) == "NE" && compass(180) == "S")
+precondition(compass(271) == "W" && compass(-90) == "W" && compass(.nan) == "–")
+let rows = csv(moving).split(separator: "\n")
+precondition(rows.count == 4 && rows[0].hasPrefix("time,lat"), "csv rows")
+precondition(rows[2] == "1970-01-01T00:00:05Z,52.001,21.0,105.0,79.2,,5", "csv row: \(rows[2])")
 print("OK")

@@ -82,6 +82,26 @@ func gpx(_ points: [TrackPoint]) -> String {
     return s + "</trkseg></trk>\n</gpx>\n"
 }
 
+func csv(_ points: [TrackPoint]) -> String {
+    let iso = ISO8601DateFormatter()
+    var s = "time,lat,lon,alt_m,speed_kmh,course_deg,accuracy_m\n"
+    for p in points {
+        let v = p.speed.map { String(format: "%.1f", $0 * 3.6) } ?? ""
+        let c = p.course.map { String(format: "%.0f", $0) } ?? ""
+        let alt = String(format: "%.1f", p.alt), acc = String(format: "%.0f", p.hAcc)
+        s += "\(iso.string(from: p.t)),\(p.lat),\(p.lon),\(alt),\(v),\(c),\(acc)\n"
+    }
+    return s
+}
+
+/// 0 = N, 90 = E; any finite degree value is accepted.
+func compass(_ degrees: Double) -> String {
+    guard degrees.isFinite else { return "–" }
+    let names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    let i = Int(((degrees.truncatingRemainder(dividingBy: 360) + 360 + 22.5) / 45).rounded(.down)) % 8
+    return names[i]
+}
+
 func formatDuration(_ seconds: Double) -> String {
     let s = Int(max(0, seconds))
     return String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
