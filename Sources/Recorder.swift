@@ -1,3 +1,4 @@
+import Combine
 import CoreLocation
 import UIKit
 
@@ -20,6 +21,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     private let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     private var file: FileHandle?
     private var fileURL: URL?
+    private var startedAt = Date.distantPast
 
     override init() {
         super.init()
@@ -45,6 +47,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         fileURL = url
         points = []
         error = nil
+        startedAt = Date()
         isRecording = true
         UIApplication.shared.isIdleTimerDisabled = true // keep the screen on in the car
         manager.requestWhenInUseAuthorization()
@@ -83,7 +86,8 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard isRecording, let file else { return }
-        for loc in locations where loc.horizontalAccuracy >= 0 && loc.horizontalAccuracy <= Self.maxHorizontalAccuracy {
+        // CoreLocation first hands over its cached fix, which can be hours old: skip anything from before Start.
+        for loc in locations where loc.timestamp >= startedAt && loc.horizontalAccuracy >= 0 && loc.horizontalAccuracy <= Self.maxHorizontalAccuracy {
             let p = TrackPoint(t: loc.timestamp,
                                lat: loc.coordinate.latitude,
                                lon: loc.coordinate.longitude,
