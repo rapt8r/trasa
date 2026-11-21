@@ -60,7 +60,8 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     func pause() {
         guard isRecording, !isPaused else { return }
-        manager.stopUpdatingLocation()
+        // GPS keeps running and fixes are dropped in didUpdateLocations: stopping updates
+        // would let iOS suspend the app in the background mid-pause. Costs battery while paused.
         isPaused = true
     }
 
