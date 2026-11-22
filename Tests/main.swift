@@ -88,9 +88,80 @@ cs.update(fix(14, 0, nil))
 cs.update(fix(17, 0, nil))
 precondition(cs.driving, "dwell restarted after speeding up")
 cs.update(fix(18.5, 0, nil))
-precondition(!cs.driving && cs.blend == 0.75, "drops to top-down after the dwell, gradually")
+precondition(!cs.driving && cs.blend == 0.625, "drops to top-down after the dwell, gradually")
 for i in 20..<25 { cs.update(fix(Double(i), 0, nil)) }
 spec = cs.spec(for: fix(25, 0, nil))
 precondition(cs.blend == 0 && spec.pitch == 0 && spec.lat == 52 && spec.lon == 21)
 precondition(spec.heading == 100 && spec.distance == cameraOverheadDistance, "top-down keeps the heading")
+// Camera blend is time-based: ten 0.1 s samples change the view as much as one 1 s fix
+var fast = CameraState()
+fast.update(fix(0, 10, 90))
+for i in 1...10 { fast.update(fix(Double(i) / 10, 10, 90)) }
+precondition(abs(fast.blend - 0.25) < 1e-9, "blend at 10 Hz: \(fast.blend)")
+
+// Replay sampling
+let mid = samplePoint(moving, at: Date(timeIntervalSince1970: 2.5))!
+precondition(mid.index == 0 && abs(mid.point.lat - 52.0005) < 1e-9 && abs(mid.point.speed! - 21) < 1e-9, "replay midpoint")
+precondition(samplePoint(moving, at: Date(timeIntervalSince1970: 99))!.index == 2)
+precondition(samplePoint(moving, at: Date(timeIntervalSince1970: -5))!.point.lat == 52.0)
+precondition(samplePoint(moving, at: Date(timeIntervalSince1970: 7), from: 1)!.index == 1)
+precondition(samplePoint([], at: Date()) == nil)
+var wrapA = pt(0, 52, 21, speed: 10); wrapA.course = 350
+var wrapB = pt(2, 52, 21, speed: 10); wrapB.course = 10
+let wrapped = samplePoint([wrapA, wrapB], at: Date(timeIntervalSince1970: 1))!.point.course!
+precondition(wrapped < 1e-9 || wrapped > 360 - 1e-9, "course interpolates through north: \(wrapped)")
+let gapped = moving + [resumed, resumed2]
+let inGap = samplePoint(gapped, at: Date(timeIntervalSince1970: 500))!
+precondition(inGap.index == 2 && inGap.point.lat == 52.002, "no gliding across a pause")
+precondition(nextReplayClock(gapped, index: 2, clock: Date(timeIntervalSince1970: 10), step: 0.5) == resumed.t, "pause is skipped")
+precondition(nextReplayClock(gapped, index: 0, clock: Date(timeIntervalSince1970: 1), step: 0.5) == Date(timeIntervalSince1970: 1.5))
+precondition(nextReplayClock(gapped, index: 4, clock: Date(timeIntervalSince1970: 1005), step: 0.5) == Date(timeIntervalSince1970: 1005.5))
+
+// Fuel cost
+precondition(fuelUsed(distance: 50_000, per100: 8) == 4 && fuelUsed(distance: -1, per100: 8) == 0 && fuelUsed(distance: 1000, per100: -3) == 0)
+precondition(formatCost(26) == "26.00 zł" && formatLitres(4.04) == "4.0 l")
+
+// Weekly / monthly statistics
+var cal = Calendar(identifier: .gregorian)
+cal.timeZone = TimeZone(identifier: "UTC")!
+cal.firstWeekday = 2
+func tripOn(_ month: Int, _ day: Int) -> Trip {
+    let t0 = cal.date(from: DateComponents(year: 2026, month: month, day: day, hour: 12))!.timeIntervalSince1970
+    return Trip(url: URL(fileURLWithPath: "/t\(month)-\(day)"), points: [pt(t0, 52, 21, speed: 20), pt(t0 + 5, 52.001, 21, speed: 20)])
+}
+let history = [tripOn(11, 2), tripOn(11, 3), tripOn(11, 20), tripOn(12, 1)] // 2 Nov 2026 is a Monday
+let months = summarize(history, by: .month, calendar: cal)
+precondition(months.count == 2 && months[0].count == 1 && months[1].count == 3, "months")
+precondition(abs(months[1].distance - 333.6) < 1.5 && months[1].duration == 15 && months[0].start > months[1].start)
+let weeks = summarize(history, by: .weekOfYear, calendar: cal)
+precondition(weeks.count == 3 && weeks.last!.count == 2, "weeks: \(weeks.map(\.count))")
+precondition(summarize([], by: .month, calendar: cal).isEmpty)
+
+// Speed limits
+precondition(parseSpeedLimit(maxspeed: "50", highway: "residential") == 50 && parseSpeedLimit(maxspeed: " 70 ", highway: "primary") == 70)
+precondition(parseSpeedLimit(maxspeed: "PL:urban", highway: "residential") == 50 && parseSpeedLimit(maxspeed: "PL:rural", highway: "tertiary") == 90)
+precondition(parseSpeedLimit(maxspeed: nil, highway: "motorway") == 140 && parseSpeedLimit(maxspeed: nil, highway: "living_street") == 20)
+precondition(parseSpeedLimit(maxspeed: nil, highway: "residential") == nil, "no guessing from the road class")
+precondition(parseSpeedLimit(maxspeed: "50 mph", highway: "primary") == nil && parseSpeedLimit(maxspeed: "none", highway: "motorway") == nil)
+precondition(parseSpeedLimit(maxspeed: "0", highway: "primary") == nil && parseSpeedLimit(maxspeed: "999", highway: "primary") == nil)
+
+let osm = Data(#"{"elements":[{"type":"way","id":1,"geometry":[{"lat":52.0,"lon":20.99},{"lat":52.0,"lon":21.01}],"tags":{"highway":"primary","maxspeed":"70","name":"Wschodnia"}},{"type":"way","id":2,"geometry":[{"lat":51.99,"lon":21.0},null,{"lat":52.01,"lon":21.0}],"tags":{"highway":"residential","name":"Polnocna"}},{"type":"node","id":3},{"type":"way","id":4,"geometry":[{"lat":1,"lon":1}],"tags":{"highway":"primary"}}]}"#.utf8)
+let ways = parseWays(osm)!
+precondition(ways.count == 2 && ways[0].limit == 70 && ways[0].name == "Wschodnia" && ways[1].limit == nil && ways[1].lats.count == 2, "parseWays")
+precondition(parseWays(Data("oops".utf8)) == nil && parseWays(Data(#"{"elements":[]}"#.utf8))!.isEmpty)
+// At the crossing: 5 m north of the east-west road, 3 m east of the north-south road
+let nearLat = 52.0 + 5 / 111_320.0, nearLon = 21.0 + 3 / (111_320.0 * cos(52.0 * Double.pi / 180))
+precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: 92)?.name == "Wschodnia", "heading east")
+precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: 268)?.name == "Wschodnia", "heading west")
+precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: 5)?.name == "Polnocna", "heading north")
+precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: nil)?.name == "Polnocna", "no course: nearest")
+precondition(matchRoad(ways, lat: 52.005, lon: 21.005, course: 90) == nil, "500 m from any road")
+precondition(matchRoad([], lat: 52, lon: 21, course: nil) == nil)
+
+let tile = RoadTile(lat: 52.2297, lon: 21.0122)
+precondition(tile.south <= 52.2297 && tile.north > 52.2297 && tile.west <= 21.0122 && tile.east > 21.0122)
+precondition(abs(tile.north - tile.south - roadTileSize) < 1e-9 && tile == RoadTile(lat: 52.2101, lon: 21.0299))
+precondition(RoadTile(lat: -0.01, lon: -0.01).x == -1 && RoadTile(lat: -0.01, lon: -0.01).y == -1)
+let q = overpassQuery(tile)
+precondition(q.contains("out tags geom;") && q.contains(String(format: "(%.4f,", tile.south)) && q.contains("living_street"), q)
 print("OK")

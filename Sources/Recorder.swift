@@ -15,6 +15,12 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var points: [TrackPoint] = []
     /// Latest fix, recording or not: drives the map camera and the speedometer.
     @Published var live: TrackPoint?
+    /// Non-nil while a saved trip is being replayed on the map (debug aid); `live` then comes from it.
+    @Published var replayTrip: Trip?
+    @Published var replayRate = 1.0
+    /// Seconds between `live` updates: 1 for GPS, `replayTick` during a replay. Used to pace animations.
+    private(set) var liveInterval = 1.0
+    var isReplaying: Bool { replayTrip != nil }
     @Published var isRecording = false
     @Published var isPaused = false
     @Published var trips: [Trip] = []
@@ -28,6 +34,10 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     private var fileURL: URL?
     private var startedAt = Date.distantPast
     private var segment = 0
+    private static let replayTick = 0.1 // s
+    private var replayTimer: Timer?
+    private var replayClock = Date.distantPast
+    private var replayIndex = 0
 
     override init() {
         super.init()
@@ -47,6 +57,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     }
 
     func start() {
+        stopReplay()
         let url = dir.appendingPathComponent("trip-\(Int(Date().timeIntervalSince1970)).jsonl")
         guard FileManager.default.createFile(atPath: url.path, contents: nil),
               let handle = try? FileHandle(forWritingTo: url) else {
@@ -93,6 +104,50 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         loadTrips()
     }
 
+    // MARK: Replay (nothing is written to disk)
+
+    func startReplay(_ trip: Trip) {
+        guard !isRecording, let first = trip.points.first else { return }
+        stopReplay()
+        points = []
+        replayClock = first.t
+        replayIndex = 0
+        liveInterval = Self.replayTick
+        replayTrip = trip
+        UIApplication.shared.isIdleTimerDisabled = true
+        let timer = Timer(timeInterval: Self.replayTick, repeats: true) { [weak self] _ in self?.replayStep() }
+        RunLoop.main.add(timer, forMode: .common)
+        replayTimer = timer
+    }
+
+    func stopReplay() {
+        replayTimer?.invalidate()
+        replayTimer = nil
+        guard replayTrip != nil else { return }
+        replayTrip = nil
+        points = []
+        live = nil
+        liveInterval = 1
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    private func replayStep() {
+        guard let track = replayTrip?.points, let sample = samplePoint(track, at: replayClock, from: replayIndex) else {
+            stopReplay()
+            return
+        }
+        if sample.index >= points.count { points.append(contentsOf: track[points.count...sample.index]) }
+        replayIndex = sample.index
+        live = sample.point
+        if sample.index >= track.count - 1 {
+            // End of the trip: keep the last frame on screen until the user taps "Zakończ".
+            replayTimer?.invalidate()
+            replayTimer = nil
+            return
+        }
+        replayClock = nextReplayClock(track, index: sample.index, clock: replayClock, step: Self.replayTick * replayRate)
+    }
+
     func delete(_ trip: Trip) {
         try? FileManager.default.removeItem(at: trip.url)
         trips.removeAll { $0.id == trip.id }
@@ -124,7 +179,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
                                hAcc: loc.horizontalAccuracy,
                                seg: segment == 0 ? nil : segment)
             // CoreLocation first hands over its cached fix, which can be hours old.
-            if loc.timestamp.timeIntervalSinceNow > -Self.maxLiveAge { live = p }
+            if !isReplaying, loc.timestamp.timeIntervalSinceNow > -Self.maxLiveAge { live = p }
             // Recording: same rules as before - skip anything from before Start / Resume.
             guard isRecording, !isPaused, let file, loc.timestamp >= startedAt else { continue }
             // Appended to disk right away: if iOS kills the app mid-drive, the trip so far is kept.
