@@ -135,3 +135,72 @@ func formatDuration(_ seconds: Double) -> String {
 
 func formatKm(_ metres: Double) -> String { String(format: "%.2f km", metres / 1000) }
 func formatKmh(_ mps: Double) -> String { String(format: "%.0f km/h", mps * 3.6) }
+
+// MARK: Follow camera (pure logic; the view turns CameraSpec into a MapCamera)
+
+// All of these need tuning on a real drive.
+let cameraEnterSpeed = 15.0 / 3.6     // m/s; at or above: behind-the-marker view
+let cameraExitSpeed = 8.0 / 3.6       // m/s; below this for cameraExitDwell: top-down view
+let cameraExitDwell = 4.0             // s; stops stop-and-go traffic from flipping the view
+let cameraHeadingMinSpeed = 1.5       // m/s; below this GPS course is noise, the last heading is held
+let cameraBlendStep = 0.25            // share of the view change done per GPS fix (4 fixes = full change)
+let cameraDrivingPitch = 60.0         // degrees
+let cameraDrivingDistance = 450.0     // m from camera to the point it looks at, at low speed
+let cameraDistancePerSpeed = 10.0     // extra metres of distance per m/s, so the view opens up when fast
+let cameraLookAhead = 120.0           // m ahead of the car the camera aims at; puts the marker low on screen
+let cameraOverheadDistance = 900.0    // m
+
+struct CameraSpec {
+    var lat: Double
+    var lon: Double
+    var distance: Double
+    var heading: Double
+    var pitch: Double
+}
+
+/// Point reached from (lat, lon) after `distance` metres along `bearing` degrees.
+func destination(lat: Double, lon: Double, bearing: Double, distance: Double) -> (lat: Double, lon: Double) {
+    let rad = Double.pi / 180, d = distance / 6_371_000.0
+    let p1 = lat * rad, l1 = lon * rad, b = bearing * rad
+    let p2 = asin(sin(p1) * cos(d) + cos(p1) * sin(d) * cos(b))
+    let l2 = l1 + atan2(sin(b) * sin(d) * cos(p1), cos(d) - sin(p1) * sin(p2))
+    return (p2 / rad, l2 / rad)
+}
+
+struct CameraState {
+    private(set) var driving = false
+    private(set) var heading = 0.0
+    private(set) var blend = 0.0 // 0 = top-down, 1 = behind the marker; moves a step per fix
+    private var slowSince: Date?
+
+    mutating func update(_ p: TrackPoint) {
+        let v = p.speed ?? 0
+        if let c = p.course, v >= cameraHeadingMinSpeed { heading = c }
+        if v >= cameraEnterSpeed {
+            driving = true
+            slowSince = nil
+        } else if v < cameraExitSpeed {
+            if driving {
+                let since = slowSince ?? p.t
+                slowSince = since
+                if p.t.timeIntervalSince(since) >= cameraExitDwell {
+                    driving = false
+                    slowSince = nil
+                }
+            }
+        } else {
+            slowSince = nil
+        }
+        blend = driving ? min(1, blend + cameraBlendStep) : max(0, blend - cameraBlendStep)
+    }
+
+    func spec(for p: TrackPoint) -> CameraSpec {
+        let drivingDistance = cameraDrivingDistance + (p.speed ?? 0) * cameraDistancePerSpeed
+        let aim = destination(lat: p.lat, lon: p.lon, bearing: heading, distance: cameraLookAhead * blend)
+        return CameraSpec(lat: aim.lat,
+                          lon: aim.lon,
+                          distance: cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * blend,
+                          heading: heading,
+                          pitch: cameraDrivingPitch * blend)
+    }
+}

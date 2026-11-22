@@ -9,8 +9,12 @@ extension TrackPoint {
 final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     /// Fixes worse than this are dropped (tunnels, cold start). Tune against real drives.
     static let maxHorizontalAccuracy = 50.0 // m
+    /// Fixes older than this never move the live map.
+    static let maxLiveAge = 10.0 // s
 
     @Published var points: [TrackPoint] = []
+    /// Latest fix, recording or not: drives the map camera and the speedometer.
+    @Published var live: TrackPoint?
     @Published var isRecording = false
     @Published var isPaused = false
     @Published var trips: [Trip] = []
@@ -31,12 +35,16 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         manager.activityType = .automotiveNavigation
         manager.pausesLocationUpdatesAutomatically = false
-        manager.allowsBackgroundLocationUpdates = true // needs UIBackgroundModes: location
         manager.showsBackgroundLocationIndicator = true
         loadTrips()
     }
 
-    func requestPermission() { manager.requestWhenInUseAuthorization() }
+    /// GPS runs whenever the app is on screen so the map can follow the car.
+    /// Background updates are allowed only between start() and stop().
+    func requestPermission() {
+        manager.requestWhenInUseAuthorization()
+        manager.startUpdatingLocation()
+    }
 
     func start() {
         let url = dir.appendingPathComponent("trip-\(Int(Date().timeIntervalSince1970)).jsonl")
@@ -54,6 +62,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         isPaused = false
         segment = 0
         UIApplication.shared.isIdleTimerDisabled = true // keep the screen on in the car
+        manager.allowsBackgroundLocationUpdates = true // needs UIBackgroundModes: location
         manager.requestWhenInUseAuthorization()
         manager.startUpdatingLocation()
     }
@@ -74,7 +83,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     }
 
     func stop() {
-        manager.stopUpdatingLocation()
+        manager.allowsBackgroundLocationUpdates = false // GPS stays on for the map, but only in the foreground
         try? file?.close()
         file = nil
         isRecording = false
@@ -105,9 +114,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     // MARK: CLLocationManagerDelegate
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard isRecording, !isPaused, let file else { return }
-        // CoreLocation first hands over its cached fix, which can be hours old: skip anything from before Start.
-        for loc in locations where loc.timestamp >= startedAt && loc.horizontalAccuracy >= 0 && loc.horizontalAccuracy <= Self.maxHorizontalAccuracy {
+        for loc in locations where loc.horizontalAccuracy >= 0 && loc.horizontalAccuracy <= Self.maxHorizontalAccuracy {
             let p = TrackPoint(t: loc.timestamp,
                                lat: loc.coordinate.latitude,
                                lon: loc.coordinate.longitude,
@@ -116,6 +123,10 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
                                course: loc.course >= 0 ? loc.course : nil,
                                hAcc: loc.horizontalAccuracy,
                                seg: segment == 0 ? nil : segment)
+            // CoreLocation first hands over its cached fix, which can be hours old.
+            if loc.timestamp.timeIntervalSinceNow > -Self.maxLiveAge { live = p }
+            // Recording: same rules as before - skip anything from before Start / Resume.
+            guard isRecording, !isPaused, let file, loc.timestamp >= startedAt else { continue }
             // Appended to disk right away: if iOS kills the app mid-drive, the trip so far is kept.
             do {
                 var line = try encoder.encode(p)
@@ -131,7 +142,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
         denied = status == .denied || status == .restricted
-        if isRecording && !isPaused && (status == .authorizedWhenInUse || status == .authorizedAlways) {
+        if status == .authorizedWhenInUse || status == .authorizedAlways {
             manager.startUpdatingLocation()
         }
     }

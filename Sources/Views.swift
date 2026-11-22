@@ -8,11 +8,7 @@ struct TrasaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TabView {
-                RecordView().tabItem { Label("Nagrywanie", systemImage: "record.circle") }
-                TripListView().tabItem { Label("Trasy", systemImage: "list.bullet") }
-            }
-            .environmentObject(recorder)
+            RecordView().environmentObject(recorder)
         }
     }
 }
@@ -34,72 +30,158 @@ struct Stat: View {
 struct RecordView: View {
     @EnvironmentObject var recorder: Recorder
     @State private var camera: MapCameraPosition = .userLocation(fallback: .automatic)
+    @State private var follow = CameraState()
+    @State private var showTrips = false
+    @State private var expanded = false
 
     var body: some View {
-        let stats = TripStats(recorder.points)
-        let last = recorder.points.last
-        let altitudeText: String = last.map { String(format: "%.0f m", $0.alt) } ?? "–"
-        let courseText: String = last?.course.map { compass($0) } ?? "–"
-        let accuracyText: String = last.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
         Map(position: $camera) {
             UserAnnotation()
             if recorder.points.count > 1 {
-                MapPolyline(coordinates: recorder.points.map(\.coordinate)).stroke(.blue, lineWidth: 5)
+                MapPolyline(coordinates: recorder.points.map(\.coordinate)).stroke(.blue, lineWidth: 6)
             }
         }
-        .mapControls { MapUserLocationButton() }
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 12) {
-                if recorder.denied {
-                    Text("Brak dostępu do lokalizacji. Włącz go w Ustawieniach.").foregroundStyle(.red)
+        .mapStyle(.standard(elevation: .realistic))
+        .overlay(alignment: .topTrailing) { mapButtons }
+        .safeAreaInset(edge: .bottom) { panel }
+        .onAppear { recorder.requestPermission() }
+        .onChange(of: recorder.live?.t) { moveCamera(force: false) }
+        .sheet(isPresented: $showTrips) {
+            TripListView()
+                .environmentObject(recorder)
+                .presentationDragIndicator(.visible)
+        }
+        .environment(\.colorScheme, .dark) // easier on the eyes at night in the car
+    }
+
+    /// Called once per GPS fix. Each move is animated over the gap to the next fix, so the map glides;
+    /// the top-down <-> behind-the-marker change is spread over several fixes by CameraState.
+    private func moveCamera(force: Bool) {
+        guard let p = recorder.live else { return }
+        follow.update(p)
+        // The user dragged the map: leave it alone until they tap the recenter button.
+        guard force || !camera.positionedByUser else { return }
+        let spec = follow.spec(for: p)
+        let target = MapCamera(centerCoordinate: CLLocationCoordinate2D(latitude: spec.lat, longitude: spec.lon),
+                               distance: spec.distance,
+                               heading: spec.heading,
+                               pitch: spec.pitch)
+        withAnimation(.linear(duration: 1)) { camera = .camera(target) }
+    }
+
+    private var mapButtons: some View {
+        VStack(spacing: 12) {
+            Button {
+                showTrips = true
+            } label: {
+                Image(systemName: "list.bullet")
+                    .font(.title3)
+                    .frame(width: 48, height: 48)
+                    .background(.regularMaterial, in: Circle())
+            }
+            .accessibilityLabel("Trasy")
+            if camera.positionedByUser {
+                Button {
+                    moveCamera(force: true)
+                } label: {
+                    Image(systemName: "location.fill")
+                        .font(.title3)
+                        .frame(width: 48, height: 48)
+                        .background(.regularMaterial, in: Circle())
                 }
-                if let error = recorder.error {
-                    Text(error).foregroundStyle(.red)
+                .accessibilityLabel("Wróć do mojej pozycji")
+            }
+        }
+        .padding(12)
+    }
+
+    private var panel: some View {
+        let stats = TripStats(recorder.points)
+        let live = recorder.live
+        let speedText = String(format: "%.0f", (live?.speed ?? 0) * 3.6)
+        let altitudeText: String = live.map { String(format: "%.0f m", $0.alt) } ?? "–"
+        let courseText: String = live?.course.map { compass($0) } ?? "–"
+        let accuracyText: String = live.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
+        return VStack(spacing: 10) {
+            if recorder.denied {
+                Text("Brak dostępu do lokalizacji. Włącz go w Ustawieniach.").foregroundStyle(.red)
+            }
+            if let error = recorder.error {
+                Text(error).foregroundStyle(.red)
+            }
+            HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(speedText)
+                        .font(.system(size: 52, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text("km/h").font(.subheadline).foregroundStyle(.secondary)
                 }
-                Text(recorder.isPaused ? "Pauza" : formatKmh(recorder.points.last?.speed ?? 0))
-                    .font(.system(size: 56, weight: .bold, design: .rounded))
-                    .monospacedDigit()
+                .accessibilityElement(children: .combine)
+                if recorder.isPaused {
+                    Text("PAUZA").font(.caption.bold()).foregroundStyle(.orange)
+                }
+                Spacer(minLength: 0)
+                Stat(title: "Dystans", value: formatKm(stats.distance))
+                Stat(title: "Czas", value: formatDuration(stats.duration))
+                Button {
+                    withAnimation { expanded.toggle() }
+                } label: {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.up")
+                        .font(.headline)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(expanded ? "Zwiń szczegóły" : "Rozwiń szczegóły")
+            }
+            if expanded {
                 HStack {
-                    Stat(title: "Dystans", value: formatKm(stats.distance))
-                    Stat(title: "Czas", value: formatDuration(stats.duration))
                     Stat(title: "Maks.", value: formatKmh(stats.maxSpeed))
-                }
-                HStack {
                     Stat(title: "Średnia", value: formatKmh(stats.avgSpeed))
                     Stat(title: "Wysokość", value: altitudeText)
                     Stat(title: "Kierunek", value: courseText)
                     Stat(title: "GPS", value: accuracyText)
                 }
-                HStack(spacing: 12) {
-                    if recorder.isRecording {
-                        Button {
-                            if recorder.isPaused { recorder.resume() } else { recorder.pause() }
-                        } label: {
-                            Text(recorder.isPaused ? "Wznów" : "Pauza")
-                                .font(.title2.bold())
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.orange)
+                // Reserved for car data; filled once the OBD adapter is connected.
+                VStack(spacing: 6) {
+                    HStack {
+                        Stat(title: "Spalanie", value: "–")
+                        Stat(title: "Koszt", value: "–")
+                        Stat(title: "Obroty", value: "–")
+                        Stat(title: "Temp. silnika", value: "–")
                     }
-                    Button {
-                        if recorder.isRecording { recorder.stop() } else { recorder.start() }
-                    } label: {
-                        Text(recorder.isRecording ? "Stop" : "Start")
-                            .font(.title2.bold())
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(recorder.isRecording ? .red : .green)
+                    Text("Dane z auta pojawią się po podłączeniu OBD")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding()
-            .background(.regularMaterial)
+            HStack(spacing: 12) {
+                if recorder.isRecording {
+                    Button {
+                        if recorder.isPaused { recorder.resume() } else { recorder.pause() }
+                    } label: {
+                        Text(recorder.isPaused ? "Wznów" : "Pauza")
+                            .font(.title3.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                }
+                Button {
+                    if recorder.isRecording { recorder.stop() } else { recorder.start() }
+                } label: {
+                    Text(recorder.isRecording ? "Stop" : "Start")
+                        .font(.title3.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(recorder.isRecording ? .red : .green)
+            }
         }
-        .onAppear { recorder.requestPermission() }
-        .environment(\.colorScheme, .dark) // easier on the eyes at night in the car
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .padding(.horizontal, 8)
     }
 }
 
@@ -135,7 +217,7 @@ struct TripListView: View {
             .navigationTitle("Trasy")
             .overlay {
                 if recorder.trips.isEmpty {
-                    ContentUnavailableView("Brak tras", systemImage: "car", description: Text("Nagraj pierwszą trasę w zakładce Nagrywanie."))
+                    ContentUnavailableView("Brak tras", systemImage: "car", description: Text("Nagraj pierwszą trasę przyciskiem Start na mapie."))
                 }
             }
         }
