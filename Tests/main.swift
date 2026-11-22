@@ -99,20 +99,8 @@ fast.update(fix(0, 10, 90))
 for i in 1...10 { fast.update(fix(Double(i) / 10, 10, 90)) }
 precondition(abs(fast.blend - 0.25) < 1e-9, "blend at 10 Hz: \(fast.blend)")
 
-// Replay sampling
-let mid = samplePoint(moving, at: Date(timeIntervalSince1970: 2.5))!
-precondition(mid.index == 0 && abs(mid.point.lat - 52.0005) < 1e-9 && abs(mid.point.speed! - 21) < 1e-9, "replay midpoint")
-precondition(samplePoint(moving, at: Date(timeIntervalSince1970: 99))!.index == 2)
-precondition(samplePoint(moving, at: Date(timeIntervalSince1970: -5))!.point.lat == 52.0)
-precondition(samplePoint(moving, at: Date(timeIntervalSince1970: 7), from: 1)!.index == 1)
-precondition(samplePoint([], at: Date()) == nil)
-var wrapA = pt(0, 52, 21, speed: 10); wrapA.course = 350
-var wrapB = pt(2, 52, 21, speed: 10); wrapB.course = 10
-let wrapped = samplePoint([wrapA, wrapB], at: Date(timeIntervalSince1970: 1))!.point.course!
-precondition(wrapped < 1e-9 || wrapped > 360 - 1e-9, "course interpolates through north: \(wrapped)")
+// Replay clock
 let gapped = moving + [resumed, resumed2]
-let inGap = samplePoint(gapped, at: Date(timeIntervalSince1970: 500))!
-precondition(inGap.index == 2 && inGap.point.lat == 52.002, "no gliding across a pause")
 precondition(nextReplayClock(gapped, index: 2, clock: Date(timeIntervalSince1970: 10), step: 0.5) == resumed.t, "pause is skipped")
 precondition(nextReplayClock(gapped, index: 0, clock: Date(timeIntervalSince1970: 1), step: 0.5) == Date(timeIntervalSince1970: 1.5))
 precondition(nextReplayClock(gapped, index: 4, clock: Date(timeIntervalSince1970: 1005), step: 0.5) == Date(timeIntervalSince1970: 1005.5))
@@ -164,4 +152,29 @@ precondition(abs(tile.north - tile.south - roadTileSize) < 1e-9 && tile == RoadT
 precondition(RoadTile(lat: -0.01, lon: -0.01).x == -1 && RoadTile(lat: -0.01, lon: -0.01).y == -1)
 let q = overpassQuery(tile)
 precondition(q.contains("out tags geom;") && q.contains(String(format: "(%.4f,", tile.south)) && q.contains("living_street"), q)
+// Per-frame motion
+func eastMetres(_ p: TrackPoint) -> Double { (p.lon - 21) * 111_320 * cos(52 * Double.pi / 180) }
+var sm = MotionSmoother()
+precondition(sm.step(0.1) == nil, "nothing to show before the first fix")
+sm.feed(TrackPoint(t: Date(timeIntervalSince1970: 0), lat: 52, lon: 21, alt: 0, speed: 20, course: 90, hAcc: 5))
+precondition(sm.point!.lon == 21, "first fix is shown at once")
+for _ in 0..<30 { _ = sm.step(1.0 / 30) }
+precondition(eastMetres(sm.point!) > 10 && eastMetres(sm.point!) < 20.5, "after 1 s at 20 m/s: \(eastMetres(sm.point!))")
+precondition(abs(sm.point!.lat - 52) < 1e-6 && abs(sm.point!.speed! - 20) < 1e-9)
+for _ in 0..<150 { _ = sm.step(1.0 / 30) }
+let coasted = eastMetres(sm.point!)
+precondition(coasted > 28 && coasted < 20 * motionMaxPrediction + 0.5, "coasts, then stops without fixes: \(coasted)")
+sm.feed(TrackPoint(t: Date(timeIntervalSince1970: 7), lat: 52, lon: 21.0006, alt: 0, speed: 20, course: 90, hAcc: 5))
+precondition(sm.point!.lon < 21.0006, "a nearby fix is approached, not jumped to")
+_ = sm.step(1.0 / 30)
+precondition(eastMetres(sm.point!) > coasted, "moves on towards the new fix")
+sm.feed(TrackPoint(t: Date(timeIntervalSince1970: 8), lat: 53, lon: 22, alt: 0, speed: 0, course: nil, hAcc: 5))
+precondition(sm.point!.lat == 53 && sm.point!.lon == 22, "a far fix is shown at once")
+var turn = MotionSmoother()
+turn.feed(TrackPoint(t: Date(timeIntervalSince1970: 0), lat: 52, lon: 21, alt: 0, speed: 10, course: 350, hAcc: 5))
+_ = turn.step(0.1)
+turn.feed(TrackPoint(t: Date(timeIntervalSince1970: 1), lat: 52, lon: 21, alt: 0, speed: 10, course: 10, hAcc: 5))
+_ = turn.step(0.1)
+let turned = turn.point!.course!
+precondition(turned > 350 || turned < 10, "course turns through north, not the long way: \(turned)")
 print("OK")

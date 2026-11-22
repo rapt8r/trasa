@@ -214,30 +214,7 @@ struct CameraState {
 
 // MARK: Replay of a recorded trip
 
-let replayMaxGap = 5.0 // s; longer gaps (pauses, lost GPS) are jumped over instead of glided across
-
-/// Position along a recorded track at trip time `t`, linear between fixes. `from` is a search hint.
-func samplePoint(_ p: [TrackPoint], at t: Date, from start: Int = 0) -> (point: TrackPoint, index: Int)? {
-    guard !p.isEmpty else { return nil }
-    var i = min(max(0, start), p.count - 1)
-    while i + 1 < p.count && p[i + 1].t <= t { i += 1 }
-    guard i + 1 < p.count, t > p[i].t else { return (p[i], i) }
-    let a = p[i], b = p[i + 1]
-    let span = b.t.timeIntervalSince(a.t)
-    guard span > 0, span <= replayMaxGap, a.seg == b.seg else { return (a, i) }
-    let f = t.timeIntervalSince(a.t) / span
-    var out = a
-    out.t = t
-    out.lat = a.lat + (b.lat - a.lat) * f
-    out.lon = a.lon + (b.lon - a.lon) * f
-    out.alt = a.alt + (b.alt - a.alt) * f
-    if let s1 = a.speed, let s2 = b.speed { out.speed = s1 + (s2 - s1) * f }
-    if let c1 = a.course, let c2 = b.course {
-        let turn = (c2 - c1 + 540).truncatingRemainder(dividingBy: 360) - 180 // shortest way round
-        out.course = (c1 + turn * f + 360).truncatingRemainder(dividingBy: 360)
-    }
-    return (out, i)
-}
+let replayMaxGap = 5.0 // s; longer gaps (pauses, lost GPS) are jumped over instead of waited out
 
 /// Replay clock after one tick: advances by `step`, jumping straight to the next fix over a long gap.
 func nextReplayClock(_ p: [TrackPoint], index: Int, clock: Date, step: Double) -> Date {
@@ -245,6 +222,62 @@ func nextReplayClock(_ p: [TrackPoint], index: Int, clock: Date, step: Double) -
         return p[index + 1].t
     }
     return clock.addingTimeInterval(step)
+}
+
+// MARK: Per-frame motion between fixes
+
+let motionSmoothing = 0.35      // s; how quickly the shown position closes in on the predicted one
+let motionMaxPrediction = 1.5   // s; without a new fix the marker coasts this long, then stops
+let motionMinSpeed = 0.5        // m/s; slower than this the marker is not moved along the course
+let motionSnapDistance = 200.0  // m; a fix further away than this is shown at once, without a glide
+
+/// GPS gives one fix per second. Between fixes the car keeps its speed and course, so the shown
+/// position is predicted from the last fix and eased towards that prediction every frame.
+struct MotionSmoother {
+    private(set) var point: TrackPoint?
+    private var fix: TrackPoint?
+    private var age = 0.0
+
+    mutating func feed(_ p: TrackPoint) {
+        if let shown = point, haversine(shown, p) <= motionSnapDistance {
+            // keep gliding from where the marker is
+        } else {
+            point = p
+        }
+        fix = p
+        age = 0
+    }
+
+    /// Advances by `dt` seconds of trip time and returns the position to show.
+    mutating func step(_ dt: Double) -> TrackPoint? {
+        guard let fix, var shown = point, dt > 0 else { return point }
+        age = min(age + dt, motionMaxPrediction)
+        let v = fix.speed ?? 0
+        var target = (lat: fix.lat, lon: fix.lon)
+        if let course = fix.course, v >= motionMinSpeed {
+            target = destination(lat: fix.lat, lon: fix.lon, bearing: course, distance: v * age)
+        }
+        let k = 1 - exp(-dt / motionSmoothing)
+        shown.lat += (target.lat - shown.lat) * k
+        shown.lon += (target.lon - shown.lon) * k
+        shown.alt += (fix.alt - shown.alt) * k
+        if let speed = fix.speed {
+            let from = shown.speed ?? speed
+            shown.speed = from + (speed - from) * k
+        } else {
+            shown.speed = nil
+        }
+        if let course = fix.course {
+            let from = shown.course ?? course
+            let turn = (course - from + 540).truncatingRemainder(dividingBy: 360) - 180 // shortest way round
+            shown.course = (from + turn * k + 360).truncatingRemainder(dividingBy: 360)
+        }
+        shown.hAcc = fix.hAcc
+        shown.seg = fix.seg
+        shown.t = fix.t.addingTimeInterval(age)
+        point = shown
+        return shown
+    }
 }
 
 // MARK: Fuel cost (estimate from distance until the car reports real consumption)

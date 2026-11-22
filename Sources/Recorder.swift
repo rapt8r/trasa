@@ -18,8 +18,6 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     /// Non-nil while a saved trip is being replayed on the map (debug aid); `live` then comes from it.
     @Published var replayTrip: Trip?
     @Published var replayRate = 1.0
-    /// Seconds between `live` updates: 1 for GPS, `replayTick` during a replay. Used to pace animations.
-    private(set) var liveInterval = 1.0
     var isReplaying: Bool { replayTrip != nil }
     @Published var isRecording = false
     @Published var isPaused = false
@@ -34,7 +32,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     private var fileURL: URL?
     private var startedAt = Date.distantPast
     private var segment = 0
-    private static let replayTick = 0.1 // s
+    private static let replayTick = 0.05 // s
     private var replayTimer: Timer?
     private var replayClock = Date.distantPast
     private var replayIndex = 0
@@ -112,7 +110,6 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         points = []
         replayClock = first.t
         replayIndex = 0
-        liveInterval = Self.replayTick
         replayTrip = trip
         UIApplication.shared.isIdleTimerDisabled = true
         let timer = Timer(timeInterval: Self.replayTick, repeats: true) { [weak self] _ in self?.replayStep() }
@@ -127,25 +124,29 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         replayTrip = nil
         points = []
         live = nil
-        liveInterval = 1
         UIApplication.shared.isIdleTimerDisabled = false
     }
 
+    /// Hands the recorded fixes to `live` at the pace they were recorded (times the tempo), exactly as
+    /// GPS would, so the map, camera and road info behave as they do on a real drive.
     private func replayStep() {
-        guard let track = replayTrip?.points, let sample = samplePoint(track, at: replayClock, from: replayIndex) else {
+        guard let track = replayTrip?.points else {
             stopReplay()
             return
         }
-        if sample.index >= points.count { points.append(contentsOf: track[points.count...sample.index]) }
-        replayIndex = sample.index
-        live = sample.point
-        if sample.index >= track.count - 1 {
+        let before = replayIndex
+        while replayIndex < track.count, track[replayIndex].t <= replayClock { replayIndex += 1 }
+        if replayIndex > before {
+            points.append(contentsOf: track[before..<replayIndex])
+            live = track[replayIndex - 1]
+        }
+        if replayIndex >= track.count {
             // End of the trip: keep the last frame on screen until the user taps "Zakończ".
             replayTimer?.invalidate()
             replayTimer = nil
             return
         }
-        replayClock = nextReplayClock(track, index: sample.index, clock: replayClock, step: Self.replayTick * replayRate)
+        replayClock = nextReplayClock(track, index: max(0, replayIndex - 1), clock: replayClock, step: Self.replayTick * replayRate)
     }
 
     func delete(_ trip: Trip) {
