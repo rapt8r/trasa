@@ -220,6 +220,12 @@ parkedCar.feed(drive(1, speed: 10, course: 0))
 for _ in 0..<120 { _ = parkedCar.step(1.0 / 60, yawRate: 0, compass: 90) }
 precondition(parkedCar.point!.course! < 5 || parkedCar.point!.course! > 355, "moving: GPS course wins over the compass: \(parkedCar.point!.course!)")
 
+// List formatting
+precondition(formatShortDuration(775) == "13 min" && formatShortDuration(0) == "0 min", formatShortDuration(775))
+precondition(formatShortDuration(3900) == "1 h 05 min" && formatShortDuration(-5) == "0 min", formatShortDuration(3900))
+precondition(tripsLabel(1) == "1 przejazd" && tripsLabel(2) == "2 przejazdy" && tripsLabel(4) == "4 przejazdy")
+precondition(tripsLabel(5) == "5 przejazdów" && tripsLabel(12) == "12 przejazdów" && tripsLabel(22) == "22 przejazdy" && tripsLabel(0) == "0 przejazdów")
+
 // Speed against the limit
 precondition(!isOverLimit(speed: 50 / 3.6, limit: 50) && !isOverLimit(speed: 52.9 / 3.6, limit: 50), "small excess is tolerated")
 precondition(isOverLimit(speed: 54 / 3.6, limit: 50) && !isOverLimit(speed: nil, limit: 50))

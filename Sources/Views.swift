@@ -28,6 +28,32 @@ enum Route: Hashable {
     case settings
 }
 
+/// "Dziś, 18:12", "Wczoraj, 18:12", otherwise the date and time.
+func tripDateTitle(_ date: Date) -> String {
+    let time = date.formatted(date: .omitted, time: .shortened)
+    if Calendar.current.isDateInToday(date) { return "Dziś, " + time }
+    if Calendar.current.isDateInYesterday(date) { return "Wczoraj, " + time }
+    return date.formatted(.dateTime.day().month(.wide)) + ", " + time
+}
+
+/// A titled group of numbers or a chart, as in Health and Fitness.
+struct Card<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
 struct Stat: View {
     let title: String
     let value: String
@@ -231,9 +257,6 @@ struct MapLayer: View {
 struct DriveSheet: View {
     // ponytail: fixed resting height; measure the content instead if the largest text sizes clip it.
     static let compactHeight: CGFloat = 190
-    /// Height of the home-indicator strip under the resting sheet; the list must start below it,
-    /// or its first rows peek out under the controls.
-    static let homeIndicatorStrip: CGFloat = 40
     static let compactDetent = PresentationDetent.height(compactHeight)
 
     @EnvironmentObject var recorder: Recorder
@@ -248,22 +271,32 @@ struct DriveSheet: View {
     var body: some View {
         let stats = TripStats(recorder.points)
         NavigationStack(path: $path) {
-            VStack(spacing: 0) {
-                hud(stats)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 24)
-                    .frame(height: Self.compactHeight + Self.homeIndicatorStrip, alignment: .top)
-                List {
-                    currentTrip(stats)
-                    savedTrips
-                    Section {
-                        NavigationLink(value: Route.stats) { Label("Statystyki", systemImage: "chart.bar") }
-                        NavigationLink(value: Route.settings) { Label("Ustawienia", systemImage: "gearshape") }
+            GeometryReader { geo in
+                // As in Maps: what sits below the controls is hidden at rest and fades in as the sheet
+                // is pulled up, so nothing peeks out under the buttons and no gap is left above the list.
+                let rising = min(1, max(0, (geo.size.height - Self.compactHeight - 20) / 90))
+                let reveal = detent == Self.compactDetent ? 0 : rising
+                VStack(spacing: 0) {
+                    hud(stats)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 24)
+                        .padding(.bottom, 4)
+                    List {
+                        currentTrip(stats)
+                        savedTrips
+                        Section {
+                            NavigationLink(value: Route.stats) { Label("Statystyki", systemImage: "chart.bar.fill") }
+                            NavigationLink(value: Route.settings) { Label("Ustawienia", systemImage: "gearshape.fill") }
+                        }
                     }
+                    .listStyle(.insetGrouped)
+                    .listSectionSpacing(.compact)
+                    .scrollContentBackground(.hidden)
+                    .contentMargins(.top, 8, for: .scrollContent)
+                    .opacity(reveal)
+                    .allowsHitTesting(reveal > 0.5)
+                    .animation(.easeInOut(duration: 0.2), value: reveal)
                 }
-                .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
-                .contentMargins(.top, 0, for: .scrollContent)
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
@@ -401,7 +434,7 @@ struct DriveSheet: View {
                     Text("\(Int(rate))×")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 44)
+                        .frame(height: 50)
                         .background(selected ? Color.blue : Color.primary.opacity(0.1), in: Capsule())
                         .foregroundStyle(selected ? Color.white : Color.primary)
                 }
@@ -412,33 +445,50 @@ struct DriveSheet: View {
             Button {
                 recorder.stopReplay()
             } label: {
-                Text("Zakończ").font(.headline)
+                Text("Zakończ")
+                    .font(.headline)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 18)
+                    .frame(height: 50)
+                    .background(Color.red, in: Capsule())
+                    .foregroundStyle(.white)
             }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .controlSize(.large)
-            .tint(.red)
+            .buttonStyle(.plain)
+            .layoutPriority(1)
         }
     }
 
+    @ViewBuilder
     private func currentTrip(_ stats: TripStats) -> some View {
         let live = recorder.live
-        let fuel = fuelUsed(distance: stats.distance, per100: fuelPer100)
         let altitudeText: String = live.map { String(format: "%.0f m", $0.alt) } ?? "–"
         let courseText: String = live?.course.map { compass($0) } ?? "–"
         let accuracyText: String = live.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
-        return Section(recorder.isReplaying ? "Odtwarzany przejazd" : "Ten przejazd") {
-            HStack {
-                Stat(title: "Maks.", value: formatKmh(stats.maxSpeed))
-                Stat(title: "Średnia", value: formatKmh(stats.avgSpeed))
-                Stat(title: "Paliwo", value: formatLitres(fuel))
-                Stat(title: "Koszt", value: formatCost(fuel * fuelPrice))
+        if recorder.isRecording || recorder.isReplaying {
+            let fuel = fuelUsed(distance: stats.distance, per100: fuelPer100)
+            Section(recorder.isReplaying ? "Odtwarzany przejazd" : "Ten przejazd") {
+                HStack {
+                    Stat(title: "Maks.", value: formatKmh(stats.maxSpeed))
+                    Stat(title: "Średnia", value: formatKmh(stats.avgSpeed))
+                    Stat(title: "Paliwo", value: formatLitres(fuel))
+                    Stat(title: "Koszt", value: formatCost(fuel * fuelPrice))
+                }
+                HStack {
+                    Stat(title: "Wysokość", value: altitudeText)
+                    Stat(title: "Kierunek", value: courseText)
+                    Stat(title: "GPS", value: accuracyText)
+                    GStat(meter: gMeter)
+                }
             }
-            HStack {
-                Stat(title: "Wysokość", value: altitudeText)
-                Stat(title: "Kierunek", value: courseText)
-                Stat(title: "GPS", value: accuracyText)
-                GStat(meter: gMeter)
+        } else {
+            Section("Teraz") {
+                HStack {
+                    Stat(title: "Wysokość", value: altitudeText)
+                    Stat(title: "Kierunek", value: courseText)
+                    Stat(title: "GPS", value: accuracyText)
+                    GStat(meter: gMeter)
+                }
             }
         }
     }
@@ -460,11 +510,19 @@ struct DriveSheet: View {
             }
             ForEach(recorder.trips) { trip in
                 NavigationLink(value: Route.trip(trip.url)) {
-                    VStack(alignment: .leading) {
-                        Text(trip.start.formatted(date: .abbreviated, time: .shortened)).font(.headline)
-                        Text("\(formatKm(trip.stats.distance)) · \(formatDuration(trip.stats.duration)) · śr. \(formatKmh(trip.stats.avgSpeed))")
+                    HStack(spacing: 12) {
+                        Image(systemName: "car.fill")
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white)
+                            .frame(width: 34, height: 34)
+                            .background(Color.blue, in: Circle())
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(tripDateTitle(trip.start)).font(.headline)
+                            Text("\(formatKm(trip.stats.distance)) · \(formatShortDuration(trip.stats.duration)) · śr. \(formatKmh(trip.stats.avgSpeed))")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -485,29 +543,60 @@ struct StatsView: View {
         let unit: Calendar.Component = weekly ? .weekOfYear : .month
         let periods: [PeriodSummary] = summarize(recorder.trips, by: unit)
         let recent: [PeriodSummary] = Array(periods.prefix(12).reversed())
+        let barWidth: MarkDimension = recent.count < 6 ? .fixed(34) : .ratio(0.6)
         List {
-            Picker("Okres", selection: $weekly) {
-                Text("Miesiące").tag(false)
-                Text("Tygodnie").tag(true)
-            }
-            .pickerStyle(.segmented)
-            if !recent.isEmpty {
-                Chart(recent) { period in
-                    BarMark(x: .value("Okres", period.start, unit: unit),
-                            y: .value("km", period.distance / 1000))
+            Section {
+                Picker("Okres", selection: $weekly) {
+                    Text("Miesiące").tag(false)
+                    Text("Tygodnie").tag(true)
                 }
-                .frame(height: 180)
-                .accessibilityLabel("Kilometry w kolejnych okresach")
+                .pickerStyle(.segmented)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
             }
-            ForEach(periods) { period in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title(period.start)).font(.headline)
-                    Text(summary(period))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+            if let latest = periods.first {
+                Section {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title(latest.start).uppercased())
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(String(format: "%.1f", locale: Locale.current, latest.distance / 1000))
+                                .font(.system(size: 40, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                            Text("km").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                        }
+                        Text(summary(latest))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    Chart(recent) { period in
+                        BarMark(x: .value("Okres", label(period.start)),
+                                y: .value("km", period.distance / 1000),
+                                width: barWidth)
+                            .foregroundStyle(period.start == latest.start ? Color.blue : Color.blue.opacity(0.45))
+                            .cornerRadius(5)
+                    }
+                    .chartYAxisLabel("km")
+                    .frame(height: 170)
+                    .padding(.vertical, 6)
+                    .accessibilityLabel("Kilometry w kolejnych okresach")
+                }
+                Section(weekly ? "Tygodnie" : "Miesiące") {
+                    ForEach(periods) { period in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(title(period.start)).font(.headline)
+                            Text(summary(period))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
         }
+        .listSectionSpacing(.compact)
+        .contentMargins(.top, 8, for: .scrollContent)
         .navigationTitle("Statystyki")
         .navigationBarTitleDisplayMode(.inline)
         .overlay {
@@ -519,13 +608,20 @@ struct StatsView: View {
 
     private func title(_ start: Date) -> String {
         weekly
-            ? "Tydzień od " + start.formatted(.dateTime.day().month(.abbreviated).year())
+            ? "Tydzień od " + start.formatted(.dateTime.day().month(.wide))
             : start.formatted(.dateTime.month(.wide).year())
+    }
+
+    /// Short axis label: "lis" for a month, "17 lis" for a week.
+    private func label(_ start: Date) -> String {
+        weekly
+            ? start.formatted(.dateTime.day().month(.abbreviated))
+            : start.formatted(.dateTime.month(.abbreviated))
     }
 
     private func summary(_ period: PeriodSummary) -> String {
         let cost = fuelUsed(distance: period.distance, per100: fuelPer100) * fuelPrice
-        return "Przejazdy: \(period.count) · \(formatKm(period.distance)) · \(formatDuration(period.duration)) · \(formatCost(cost))"
+        return "\(tripsLabel(period.count)) · \(formatShortDuration(period.duration)) · \(formatCost(cost))"
     }
 }
 
@@ -578,101 +674,171 @@ struct TripDetailView: View {
     @State private var csvURL: URL?
     @State private var satellite = false
 
+    private static func speedColor(_ fraction: Double) -> Color {
+        Color(hue: 0.33 * (1 - fraction), saturation: 0.9, brightness: 0.85)
+    }
+
+    /// The whole route with room around it, so the start and end pins are never cut off.
+    private var routeFrame: MapCameraPosition {
+        guard let first = trip.points.first else { return .automatic }
+        var minX = Double.infinity, minY = Double.infinity, maxX = -Double.infinity, maxY = -Double.infinity
+        for p in trip.points {
+            let m = MKMapPoint(p.coordinate)
+            minX = min(minX, m.x); maxX = max(maxX, m.x)
+            minY = min(minY, m.y); maxY = max(maxY, m.y)
+        }
+        let margin = max(maxX - minX, maxY - minY) * 0.25 + MKMapPointsPerMeterAtLatitude(first.lat) * 150
+        return .rect(MKMapRect(x: minX - margin, y: minY - margin * 1.6, // extra room on top for the pins
+                               width: maxX - minX + margin * 2, height: maxY - minY + margin * 2.6))
+    }
+
     var body: some View {
         let s = trip.stats
         let chunks = speedChunks(trip.points)
         let fuel = fuelUsed(distance: s.distance, per100: fuelPer100)
+        let end = trip.points.last?.t ?? trip.start
         // Chart gets at most ~300 samples; the map and the files keep every point.
         let samples = stride(from: 0, to: trip.points.count, by: max(1, trip.points.count / 300)).map { trip.points[$0] }
         ScrollView {
-            VStack(spacing: 16) {
-                Map(initialPosition: .automatic) {
+            VStack(spacing: 14) {
+                Map(initialPosition: routeFrame) {
                     ForEach(chunks) { chunk in
                         MapPolyline(coordinates: trip.points[chunk.range].map(\.coordinate))
-                            .stroke(Color(hue: 0.33 * (1 - chunk.fraction), saturation: 0.9, brightness: 0.85), lineWidth: 5)
+                            .stroke(Self.speedColor(chunk.fraction), style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
                     }
                     if let first = trip.points.first, let last = trip.points.last {
-                        Marker("Start", coordinate: first.coordinate).tint(.green)
-                        Marker("Koniec", coordinate: last.coordinate).tint(.red)
+                        Marker("Start", systemImage: "flag.fill", coordinate: first.coordinate).tint(.green)
+                        Marker("Koniec", systemImage: "flag.checkered", coordinate: last.coordinate).tint(.red)
                     }
                 }
-                .mapStyle(satellite ? MapStyle.hybrid : MapStyle.standard)
-                .frame(height: 320)
-                .overlay(alignment: .topTrailing) {
+                .mapStyle(satellite ? .hybrid(elevation: .realistic) : .standard(elevation: .realistic, pointsOfInterest: .excludingAll))
+                .frame(height: 300)
+                .overlay(alignment: .bottomTrailing) {
                     Button {
                         satellite.toggle()
                     } label: {
-                        Image(systemName: satellite ? "map" : "globe")
+                        Image(systemName: satellite ? "map.fill" : "globe.europe.africa.fill")
+                            .font(.body)
                             .frame(width: 44, height: 44)
-                            .background(.regularMaterial, in: Circle())
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                     .accessibilityLabel(satellite ? "Mapa" : "Satelita")
-                    .padding(8)
+                    .padding(10)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                Text("Kolor trasy: zielony – wolno, czerwony – szybko")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // Legend: the colour scale with the trip's own numbers at its ends.
+                HStack(spacing: 8) {
+                    Text("0 km/h")
+                    Capsule()
+                        .fill(LinearGradient(colors: [Self.speedColor(0), Self.speedColor(0.5), Self.speedColor(1)],
+                                             startPoint: .leading, endPoint: .trailing))
+                        .frame(height: 6)
+                    Text(formatKmh(s.maxSpeed))
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Kolor trasy oznacza prędkość: zielony wolno, czerwony do \(formatKmh(s.maxSpeed))")
 
                 Button {
                     recorder.startReplay(trip)
                 } label: {
-                    Label("Odtwórz przejazd na mapie", systemImage: "play.fill")
+                    Label("Odtwórz przejazd", systemImage: "play.fill")
+                        .font(.headline)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 4)
+                        .frame(height: 30)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.large)
                 .disabled(recorder.isRecording)
 
-                Grid(horizontalSpacing: 8, verticalSpacing: 16) {
-                    GridRow {
-                        Stat(title: "Dystans", value: formatKm(s.distance))
-                        Stat(title: "Czas", value: formatDuration(s.duration))
-                        Stat(title: "Czas jazdy", value: formatDuration(s.movingTime))
-                    }
-                    GridRow {
-                        Stat(title: "Śr. prędkość", value: formatKmh(s.avgSpeed))
-                        Stat(title: "Śr. w ruchu", value: formatKmh(s.avgMovingSpeed))
-                        Stat(title: "Maks. prędkość", value: formatKmh(s.maxSpeed))
-                    }
-                    GridRow {
-                        Stat(title: "Paliwo (szac.)", value: formatLitres(fuel))
-                        Stat(title: "Koszt (szac.)", value: formatCost(fuel * fuelPrice))
-                        Stat(title: "Koszt 100 km", value: formatCost(fuelPer100 * fuelPrice))
-                    }
-                    GridRow {
-                        Stat(title: "Wys. min.", value: String(format: "%.0f m", s.minAlt))
-                        Stat(title: "Wys. maks.", value: String(format: "%.0f m", s.maxAlt))
-                        Stat(title: "Punkty GPS", value: "\(trip.points.count)")
-                    }
-                    GridRow {
-                        Stat(title: "Start", value: trip.start.formatted(date: .omitted, time: .standard))
-                        Stat(title: "Koniec", value: (trip.points.last?.t ?? trip.start).formatted(date: .omitted, time: .standard))
-                        Stat(title: "Postój", value: formatDuration(s.duration - s.movingTime))
+                Card(title: "Przejazd") {
+                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
+                        GridRow {
+                            Stat(title: "Dystans", value: formatKm(s.distance))
+                            Stat(title: "Czas", value: formatDuration(s.duration))
+                            Stat(title: "W ruchu", value: formatDuration(s.movingTime))
+                        }
+                        GridRow {
+                            Stat(title: "Start", value: trip.start.formatted(date: .omitted, time: .shortened))
+                            Stat(title: "Koniec", value: end.formatted(date: .omitted, time: .shortened))
+                            Stat(title: "Postój", value: formatDuration(s.duration - s.movingTime))
+                        }
                     }
                 }
 
-                Text("Prędkość (km/h)").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-                Chart(samples, id: \.t) { p in
-                    LineMark(x: .value("Czas", p.t), y: .value("km/h", (p.speed ?? 0) * 3.6))
+                Card(title: "Prędkość") {
+                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
+                        GridRow {
+                            Stat(title: "Średnia", value: formatKmh(s.avgSpeed))
+                            Stat(title: "W ruchu", value: formatKmh(s.avgMovingSpeed))
+                            Stat(title: "Maks.", value: formatKmh(s.maxSpeed))
+                        }
+                    }
+                    Chart(samples, id: \.t) { p in
+                        AreaMark(x: .value("Czas", p.t), y: .value("km/h", (p.speed ?? 0) * 3.6))
+                            .interpolationMethod(.monotone)
+                            .foregroundStyle(LinearGradient(colors: [Color.blue.opacity(0.35), Color.blue.opacity(0.02)],
+                                                            startPoint: .top, endPoint: .bottom))
+                        LineMark(x: .value("Czas", p.t), y: .value("km/h", (p.speed ?? 0) * 3.6))
+                            .interpolationMethod(.monotone)
+                            .foregroundStyle(Color.blue)
+                    }
+                    .chartYAxisLabel("km/h")
+                    .frame(height: 150)
+                    .accessibilityLabel("Wykres prędkości w czasie przejazdu")
                 }
-                .frame(height: 180)
 
-                Text("Wysokość (m)").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-                Chart(samples, id: \.t) { p in
-                    LineMark(x: .value("Czas", p.t), y: .value("m", p.alt))
+                Card(title: "Paliwo (szacunek)") {
+                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
+                        GridRow {
+                            Stat(title: "Paliwo", value: formatLitres(fuel))
+                            Stat(title: "Koszt", value: formatCost(fuel * fuelPrice))
+                            Stat(title: "Na 100 km", value: formatCost(fuelPer100 * fuelPrice))
+                        }
+                    }
                 }
-                .frame(height: 140)
+
+                Card(title: "Wysokość") {
+                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
+                        GridRow {
+                            Stat(title: "Min.", value: String(format: "%.0f m", s.minAlt))
+                            Stat(title: "Maks.", value: String(format: "%.0f m", s.maxAlt))
+                            Stat(title: "Punkty GPS", value: "\(trip.points.count)")
+                        }
+                    }
+                    Chart(samples, id: \.t) { p in
+                        AreaMark(x: .value("Czas", p.t), yStart: .value("m", s.minAlt), yEnd: .value("m", p.alt))
+                            .interpolationMethod(.monotone)
+                            .foregroundStyle(LinearGradient(colors: [Color.green.opacity(0.35), Color.green.opacity(0.02)],
+                                                            startPoint: .top, endPoint: .bottom))
+                        LineMark(x: .value("Czas", p.t), y: .value("m", p.alt))
+                            .interpolationMethod(.monotone)
+                            .foregroundStyle(Color.green)
+                    }
+                    .chartYScale(domain: .automatic(includesZero: false))
+                    .chartYAxisLabel("m")
+                    .frame(height: 120)
+                    .accessibilityLabel("Wykres wysokości w czasie przejazdu")
+                }
             }
-            .padding()
+            .padding(.horizontal)
+            .padding(.bottom)
         }
-        .navigationTitle(trip.start.formatted(date: .abbreviated, time: .shortened))
+        .navigationTitle(tripDateTitle(trip.start))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if let csvURL { ShareLink("CSV", item: csvURL) }
-                if let gpxURL { ShareLink("GPX", item: gpxURL) }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if let gpxURL { ShareLink("Eksportuj GPX", item: gpxURL) }
+                    if let csvURL { ShareLink("Eksportuj CSV", item: csvURL) }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .accessibilityLabel("Eksportuj trasę")
+                .disabled(gpxURL == nil && csvURL == nil)
             }
         }
         .task {

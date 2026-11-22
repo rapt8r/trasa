@@ -133,6 +133,25 @@ func formatDuration(_ seconds: Double) -> String {
     return String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
 }
 
+/// "12 min", "1 h 05 min": for lists, where the second-precise clock is noise.
+func formatShortDuration(_ seconds: Double) -> String {
+    let minutes = Int((max(0, seconds) / 60).rounded())
+    return minutes < 60 ? "\(minutes) min" : String(format: "%d h %02d min", minutes / 60, minutes % 60)
+}
+
+/// "1 przejazd", "2 przejazdy", "5 przejazdów", "22 przejazdy".
+func tripsLabel(_ n: Int) -> String {
+    let word: String
+    if n == 1 {
+        word = "przejazd"
+    } else if (2...4).contains(n % 10) && !(12...14).contains(n % 100) {
+        word = "przejazdy"
+    } else {
+        word = "przejazdów"
+    }
+    return "\(n) \(word)"
+}
+
 func formatKm(_ metres: Double, locale: Locale = .current) -> String { String(format: "%.2f km", locale: locale, metres / 1000) }
 func formatKmh(_ mps: Double) -> String { String(format: "%.0f km/h", mps * 3.6) }
 
