@@ -105,7 +105,7 @@ final class RoadInfo: ObservableObject {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 45
-        request.setValue("Trasa-iOS", forHTTPHeaderField: "User-Agent")
+        request.setValue("Journey-iOS", forHTTPHeaderField: "User-Agent")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         let query = overpassQuery(tile).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
         request.httpBody = Data(("data=" + query).utf8)

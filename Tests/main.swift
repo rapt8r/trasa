@@ -182,6 +182,40 @@ turn.feed(TrackPoint(t: Date(timeIntervalSince1970: 1), lat: 52, lon: 21, alt: 0
 _ = turn.step(0.1)
 let turned = turn.point!.course!
 precondition(turned > 350 || turned < 10, "course turns through north, not the long way: \(turned)")
+// Sensors: the gyroscope carries the course on between fixes
+func drive(_ sec: Double, lat: Double = 52, speed: Double?, course: Double?) -> TrackPoint {
+    TrackPoint(t: Date(timeIntervalSince1970: sec), lat: lat, lon: 21, alt: 0, speed: speed, course: course, hAcc: 5)
+}
+var gyro = MotionSmoother()
+gyro.feed(drive(0, speed: 20, course: 0))
+for _ in 0..<60 { _ = gyro.step(1.0 / 60, yawRate: 10) }
+precondition(abs(gyro.predictedCourse! - 10) < 0.01, "10 deg/s for 1 s: \(gyro.predictedCourse!)")
+precondition(gyro.point!.lon > 21 && gyro.point!.course! > 3 && gyro.point!.course! < 10.5, "marker bends right: \(gyro.point!.course!)")
+var wild = MotionSmoother()
+wild.feed(drive(0, speed: 20, course: 0))
+for _ in 0..<60 { _ = wild.step(1.0 / 60, yawRate: 500) }
+precondition(wild.predictedCourse! <= motionMaxTurnRate + 0.01, "phone being handled is capped: \(wild.predictedCourse!)")
+// Without a gyroscope, part of the turn seen between two fixes is assumed to continue
+var noGyro = MotionSmoother()
+noGyro.feed(drive(0, speed: 20, course: 0))
+noGyro.feed(drive(1, lat: 52.00018, speed: 20, course: 20))
+for _ in 0..<30 { _ = noGyro.step(1.0 / 60) }
+precondition(abs(noGyro.predictedCourse! - (20 + 20 * motionGpsTurnShare * 0.5)) < 0.01, "GPS-only turn: \(noGyro.predictedCourse!)")
+// A gyroscope reading of zero overrides that guess
+var straight = MotionSmoother()
+straight.feed(drive(0, speed: 20, course: 0))
+straight.feed(drive(1, lat: 52.00018, speed: 20, course: 20))
+for _ in 0..<30 { _ = straight.step(1.0 / 60, yawRate: 0) }
+precondition(abs(straight.predictedCourse! - 20) < 1e-9)
+// Compass: only while standing still
+var parkedCar = MotionSmoother()
+parkedCar.feed(drive(0, speed: 0, course: nil))
+_ = parkedCar.step(0.1, compass: 90)
+precondition(parkedCar.point!.course == 90 && parkedCar.point!.lat == 52, "compass gives the direction at a standstill")
+parkedCar.feed(drive(1, speed: 10, course: 0))
+for _ in 0..<120 { _ = parkedCar.step(1.0 / 60, yawRate: 0, compass: 90) }
+precondition(parkedCar.point!.course! < 5 || parkedCar.point!.course! > 355, "moving: GPS course wins over the compass: \(parkedCar.point!.course!)")
+
 // Spring: eases in and out, settles on the target, never overshoots
 var sv = 0.0, sVel = 0.0, sPeak = 0.0, sFirst = 0.0
 for i in 0..<120 {

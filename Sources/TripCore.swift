@@ -75,7 +75,7 @@ func parseJSONL(_ data: Data) -> [TrackPoint] {
 func gpx(_ points: [TrackPoint]) -> String {
     let iso = ISO8601DateFormatter()
     var s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-    s += "<gpx version=\"1.1\" creator=\"Trasa\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n<trk><trkseg>\n"
+    s += "<gpx version=\"1.1\" creator=\"Journey\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n<trk><trkseg>\n"
     for p in points {
         s += "<trkpt lat=\"\(p.lat)\" lon=\"\(p.lon)\"><ele>\(p.alt)</ele><time>\(iso.string(from: p.t))</time>"
         if let v = p.speed { s += "<extensions><speed>\(v)</speed></extensions>" }
@@ -272,21 +272,33 @@ func nextReplayClock(_ p: [TrackPoint], index: Int, clock: Date, step: Double) -
 
 let motionSmoothing = 0.3       // s; how quickly the shown position closes in on the predicted one
 let motionTurnSmoothing = 0.35  // s; the same for the direction the marker points
+let motionMaxTurnRate = 60.0    // deg/s; anything faster is the phone being handled, not the car turning
+let motionGpsTurnShare = 0.5    // without a gyroscope: how much of the turn seen between two fixes is assumed to continue
 let motionMaxPrediction = 1.5   // s; without a new fix the marker coasts this long, then stops
 let motionMinSpeed = 0.5        // m/s; slower than this the marker is not moved along the course
 let motionSnapDistance = 200.0  // m; a fix further away than this is shown at once, without a glide
 
-/// GPS gives one fix per second. Between fixes the car keeps its speed and course, so the shown
-/// position is predicted from the last fix and eased towards that prediction every frame.
+/// GPS gives one fix per second. Between fixes the car keeps its speed and goes on turning at the
+/// rate the gyroscope reports (or, without one, part of the rate seen between the last two fixes),
+/// so the shown position is predicted from the last fix and eased towards that prediction every frame.
 struct MotionSmoother {
     private(set) var point: TrackPoint?
+    /// Where the car is assumed to be heading right now: the fix's course carried on by the turn rate.
+    private(set) var predictedCourse: Double?
     private var fix: TrackPoint?
+    private var predicted = (lat: 0.0, lon: 0.0)
+    private var gpsTurnRate = 0.0 // deg/s
     private var age = 0.0
     private var latVelocity = 0.0
     private var lonVelocity = 0.0
     private var courseVelocity = 0.0
 
     mutating func feed(_ p: TrackPoint) {
+        gpsTurnRate = 0
+        if let last = fix, let c0 = last.course, let c1 = p.course {
+            let dt = p.t.timeIntervalSince(last.t)
+            if dt > 0, dt <= 3 { gpsTurnRate = shortestTurn(from: c0, to: c1) / dt * motionGpsTurnShare }
+        }
         if let shown = point, haversine(shown, p) <= motionSnapDistance {
             // keep gliding from where the marker is
         } else {
@@ -296,21 +308,30 @@ struct MotionSmoother {
             courseVelocity = 0
         }
         fix = p
+        predicted = (p.lat, p.lon)
+        predictedCourse = p.course
         age = 0
     }
 
     /// Advances by `dt` seconds of trip time and returns the position to show.
-    mutating func step(_ dt: Double) -> TrackPoint? {
+    /// - yawRate: turn rate from the gyroscope, degrees per second clockwise; nil when there is none.
+    /// - compass: compass heading in degrees; only used while the car stands still.
+    mutating func step(_ dt: Double, yawRate: Double? = nil, compass: Double? = nil) -> TrackPoint? {
         guard let fix, var shown = point, dt > 0 else { return point }
-        age = min(age + dt, motionMaxPrediction)
         let v = fix.speed ?? 0
-        var target = (lat: fix.lat, lon: fix.lon)
-        if let course = fix.course, v >= motionMinSpeed {
-            target = destination(lat: fix.lat, lon: fix.lon, bearing: course, distance: v * age)
+        let moving = v >= motionMinSpeed
+        // Without a new fix the prediction runs for motionMaxPrediction seconds, then holds.
+        let run = max(0, min(dt, motionMaxPrediction - age))
+        age = min(age + dt, motionMaxPrediction)
+        if moving, run > 0, let course = predictedCourse {
+            let rate = max(-motionMaxTurnRate, min(motionMaxTurnRate, yawRate ?? gpsTurnRate))
+            let next = wrapDegrees(course + rate * run)
+            predictedCourse = next
+            predicted = destination(lat: predicted.lat, lon: predicted.lon, bearing: next, distance: v * run)
         }
         // Springs, not a straight blend: the marker picks up and settles gently when a fix corrects it.
-        springStep(&shown.lat, &latVelocity, to: target.lat, smoothTime: motionSmoothing, dt: dt)
-        springStep(&shown.lon, &lonVelocity, to: target.lon, smoothTime: motionSmoothing, dt: dt)
+        springStep(&shown.lat, &latVelocity, to: predicted.lat, smoothTime: motionSmoothing, dt: dt)
+        springStep(&shown.lon, &lonVelocity, to: predicted.lon, smoothTime: motionSmoothing, dt: dt)
         let k = 1 - exp(-dt / motionSmoothing)
         shown.alt += (fix.alt - shown.alt) * k
         if let speed = fix.speed {
@@ -319,10 +340,11 @@ struct MotionSmoother {
         } else {
             shown.speed = nil
         }
-        if let course = fix.course {
-            let from = shown.course ?? course
+        // Standing still, GPS has no course: the compass says which way the car points.
+        if let target = moving ? predictedCourse : (compass ?? predictedCourse) {
+            let from = shown.course ?? target
             var value = from
-            springStep(&value, &courseVelocity, to: from + shortestTurn(from: from, to: course),
+            springStep(&value, &courseVelocity, to: from + shortestTurn(from: from, to: target),
                        smoothTime: motionTurnSmoothing, dt: dt)
             shown.course = wrapDegrees(value)
         }

@@ -44,6 +44,15 @@ struct Stat: View {
     }
 }
 
+/// Its own view, so only this number redraws when the accelerometer reading changes.
+struct GStat: View {
+    @ObservedObject var meter: GMeter
+
+    var body: some View {
+        Stat(title: "Przeciążenie", value: String(format: "%.2f g", meter.value))
+    }
+}
+
 struct SpeedLimitSign: View {
     let limit: Int
 
@@ -111,6 +120,7 @@ struct RecordView: View {
             .onChange(of: recorder.replayRate) { motion.rate = recorder.isReplaying ? recorder.replayRate : 1 }
             .onChange(of: recorder.isReplaying) {
                 motion.rate = recorder.isReplaying ? recorder.replayRate : 1
+                motion.useSensors = !recorder.isReplaying
                 if recorder.isReplaying {
                     path = []
                     detent = DriveSheet.compactDetent
@@ -118,7 +128,7 @@ struct RecordView: View {
                 }
             }
             .sheet(isPresented: .constant(true)) {
-                DriveSheet(detent: $detent, path: $path, street: road.street)
+                DriveSheet(detent: $detent, path: $path, street: road.street, gMeter: motion.gMeter)
                     .environmentObject(recorder)
                     .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
                     .presentationBackgroundInteraction(.enabled(upThrough: .medium))
@@ -216,6 +226,7 @@ struct DriveSheet: View {
     @Binding var detent: PresentationDetent
     @Binding var path: [Route]
     let street: String?
+    let gMeter: GMeter
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
 
@@ -380,6 +391,7 @@ struct DriveSheet: View {
                 Stat(title: "Wysokość", value: altitudeText)
                 Stat(title: "Kierunek", value: courseText)
                 Stat(title: "GPS", value: accuracyText)
+                GStat(meter: gMeter)
             }
         }
     }

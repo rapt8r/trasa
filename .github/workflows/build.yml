@@ -18,8 +18,8 @@ jobs:
         run: |
           mkdir Payload
           cp -R build/Release-iphoneos/Trasa.app Payload/
-          zip -r Trasa.ipa Payload
+          zip -r Journey.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
-          name: Trasa-unsigned-ipa
-          path: Trasa.ipa
+          name: Journey-unsigned-ipa
+          path: Journey.ipa
