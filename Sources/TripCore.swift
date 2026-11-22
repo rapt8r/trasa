@@ -144,11 +144,34 @@ let cameraExitSpeed = 8.0 / 3.6       // m/s; below this for cameraExitDwell: to
 let cameraExitDwell = 4.0             // s; stops stop-and-go traffic from flipping the view
 let cameraHeadingMinSpeed = 1.5       // m/s; below this GPS course is noise, the last heading is held
 let cameraBlendTime = 4.0             // s for the full top-down <-> behind-the-marker change
-let cameraDrivingPitch = 68.0         // degrees from straight down; MapKit flattens it if the camera is far away
+let cameraDrivingPitch = 60.0         // degrees from straight down; much more and the horizon cuts across the top of the screen
+let cameraHeadingSmoothing = 0.7      // s; how gently the map turns to follow the car
 let cameraDrivingDistance = 260.0     // m from camera to the point it looks at, at low speed
 let cameraDistancePerSpeed = 5.0      // extra metres of distance per m/s, so the view opens up when fast
 let cameraLookAheadFraction = 0.25    // the camera aims this share of its distance ahead of the car; puts the marker low on screen
 let cameraOverheadDistance = 650.0    // m
+
+/// One step of a critically damped spring: starts gently, arrives gently, never overshoots.
+/// `smoothTime` is roughly how long it takes to get there.
+func springStep(_ value: inout Double, _ velocity: inout Double, to target: Double, smoothTime: Double, dt: Double) {
+    guard dt > 0 else { return }
+    let omega = 2 / max(0.0001, smoothTime)
+    let decay = exp(-omega * dt)
+    let change = value - target
+    let temp = (velocity + omega * change) * dt
+    velocity = (velocity - omega * temp) * decay
+    value = target + (change + temp) * decay
+}
+
+/// Signed shortest turn from one compass direction to another, in -180...180 degrees.
+func shortestTurn(from: Double, to: Double) -> Double {
+    (to - from + 540).truncatingRemainder(dividingBy: 360) - 180
+}
+
+func wrapDegrees(_ d: Double) -> Double {
+    let r = d.truncatingRemainder(dividingBy: 360)
+    return r < 0 ? r + 360 : r
+}
 
 struct CameraSpec {
     var lat: Double
@@ -169,14 +192,36 @@ func destination(lat: Double, lon: Double, bearing: Double, distance: Double) ->
 
 struct CameraState {
     private(set) var driving = false
+    /// Where the map is turned right now; eases towards `targetHeading`.
     private(set) var heading = 0.0
-    private(set) var blend = 0.0 // 0 = top-down, 1 = behind the marker; moves a step per fix
+    /// The car's last trustworthy course.
+    private(set) var targetHeading = 0.0
+    private(set) var blend = 0.0 // 0 = top-down, 1 = behind the marker
+    private var headingVelocity = 0.0
+    private var hasHeading = false
     private var slowSince: Date?
     private var lastT: Date?
 
     mutating func update(_ p: TrackPoint) {
         let v = p.speed ?? 0
-        if let c = p.course, v >= cameraHeadingMinSpeed { heading = c }
+        // Time-based, so it behaves the same at 1 fix/s and at 60 frames/s.
+        let dt = lastT.map { min(2, max(0, p.t.timeIntervalSince($0))) } ?? 0
+        lastT = p.t
+
+        if let c = p.course, v >= cameraHeadingMinSpeed {
+            targetHeading = c
+            if !hasHeading {
+                heading = c // first course: face it at once instead of spinning round from north
+                hasHeading = true
+            }
+        }
+        if hasHeading {
+            var value = heading
+            springStep(&value, &headingVelocity, to: heading + shortestTurn(from: heading, to: targetHeading),
+                       smoothTime: cameraHeadingSmoothing, dt: dt)
+            heading = wrapDegrees(value)
+        }
+
         if v >= cameraEnterSpeed {
             driving = true
             slowSince = nil
@@ -192,24 +237,22 @@ struct CameraState {
         } else {
             slowSince = nil
         }
-        // Time-based, so it behaves the same at 1 fix/s (GPS) and at 10 samples/s (replay).
-        let dt = lastT.map { min(2, max(0, p.t.timeIntervalSince($0))) } ?? 0
-        lastT = p.t
         let step = dt / cameraBlendTime
         blend = driving ? min(1, blend + step) : max(0, blend - step)
     }
 
     func spec(for p: TrackPoint) -> CameraSpec {
+        let eased = blend * blend * (3 - 2 * blend) // ease in, ease out
         let drivingDistance = cameraDrivingDistance + (p.speed ?? 0) * cameraDistancePerSpeed
-        let distance = cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * blend
-        let aim = blend > 0
-            ? destination(lat: p.lat, lon: p.lon, bearing: heading, distance: distance * cameraLookAheadFraction * blend)
+        let distance = cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * eased
+        let aim = eased > 0
+            ? destination(lat: p.lat, lon: p.lon, bearing: heading, distance: distance * cameraLookAheadFraction * eased)
             : (lat: p.lat, lon: p.lon)
         return CameraSpec(lat: aim.lat,
                           lon: aim.lon,
                           distance: distance,
                           heading: heading,
-                          pitch: cameraDrivingPitch * blend)
+                          pitch: cameraDrivingPitch * eased)
     }
 }
 
@@ -227,7 +270,8 @@ func nextReplayClock(_ p: [TrackPoint], index: Int, clock: Date, step: Double) -
 
 // MARK: Per-frame motion between fixes
 
-let motionSmoothing = 0.35      // s; how quickly the shown position closes in on the predicted one
+let motionSmoothing = 0.3       // s; how quickly the shown position closes in on the predicted one
+let motionTurnSmoothing = 0.35  // s; the same for the direction the marker points
 let motionMaxPrediction = 1.5   // s; without a new fix the marker coasts this long, then stops
 let motionMinSpeed = 0.5        // m/s; slower than this the marker is not moved along the course
 let motionSnapDistance = 200.0  // m; a fix further away than this is shown at once, without a glide
@@ -238,12 +282,18 @@ struct MotionSmoother {
     private(set) var point: TrackPoint?
     private var fix: TrackPoint?
     private var age = 0.0
+    private var latVelocity = 0.0
+    private var lonVelocity = 0.0
+    private var courseVelocity = 0.0
 
     mutating func feed(_ p: TrackPoint) {
         if let shown = point, haversine(shown, p) <= motionSnapDistance {
             // keep gliding from where the marker is
         } else {
             point = p
+            latVelocity = 0
+            lonVelocity = 0
+            courseVelocity = 0
         }
         fix = p
         age = 0
@@ -258,9 +308,10 @@ struct MotionSmoother {
         if let course = fix.course, v >= motionMinSpeed {
             target = destination(lat: fix.lat, lon: fix.lon, bearing: course, distance: v * age)
         }
+        // Springs, not a straight blend: the marker picks up and settles gently when a fix corrects it.
+        springStep(&shown.lat, &latVelocity, to: target.lat, smoothTime: motionSmoothing, dt: dt)
+        springStep(&shown.lon, &lonVelocity, to: target.lon, smoothTime: motionSmoothing, dt: dt)
         let k = 1 - exp(-dt / motionSmoothing)
-        shown.lat += (target.lat - shown.lat) * k
-        shown.lon += (target.lon - shown.lon) * k
         shown.alt += (fix.alt - shown.alt) * k
         if let speed = fix.speed {
             let from = shown.speed ?? speed
@@ -270,8 +321,10 @@ struct MotionSmoother {
         }
         if let course = fix.course {
             let from = shown.course ?? course
-            let turn = (course - from + 540).truncatingRemainder(dividingBy: 360) - 180 // shortest way round
-            shown.course = (from + turn * k + 360).truncatingRemainder(dividingBy: 360)
+            var value = from
+            springStep(&value, &courseVelocity, to: from + shortestTurn(from: from, to: course),
+                       smoothTime: motionTurnSmoothing, dt: dt)
+            shown.course = wrapDegrees(value)
         }
         shown.hAcc = fix.hAcc
         shown.seg = fix.seg
@@ -394,11 +447,21 @@ func parseWays(_ data: Data) -> [RoadWay]? {
     }
 }
 
+struct RoadMatch {
+    let way: RoadWay
+    /// Nearest point on the road's centre line.
+    let lat: Double
+    let lon: Double
+    /// Direction of the road there, turned to agree with the course when one is given.
+    let bearing: Double
+    let distance: Double // m from the position to that point
+}
+
 /// The road the car is most likely on: nearest centre line within `roadMatchMaxDistance`
 /// that runs along the course (either direction). Without a course, simply the nearest.
-func matchRoad(_ ways: [RoadWay], lat: Double, lon: Double, course: Double?) -> RoadWay? {
+func matchRoad(_ ways: [RoadWay], lat: Double, lon: Double, course: Double?) -> RoadMatch? {
     let mPerLat = 111_320.0, mPerLon = 111_320.0 * cos(lat * Double.pi / 180)
-    var best: RoadWay?
+    var best: RoadMatch?
     var bestDistance = roadMatchMaxDistance
     for way in ways where way.lats.count > 1 {
         for i in 0..<(way.lats.count - 1) {
@@ -410,14 +473,17 @@ func matchRoad(_ ways: [RoadWay], lat: Double, lon: Double, course: Double?) -> 
             let px = ax + t * dx, py = ay + t * dy
             let distance = (px * px + py * py).squareRoot()
             guard distance < bestDistance else { continue }
+            var bearing = len2 > 0 ? wrapDegrees(atan2(dx, dy) * 180 / Double.pi) : (course ?? 0)
             if let course, len2 > 0 {
-                let bearing = atan2(dx, dy) * 180 / Double.pi
-                var diff = abs((bearing - course).truncatingRemainder(dividingBy: 180))
-                if diff > 90 { diff = 180 - diff }
-                guard diff <= roadMatchMaxAngle else { continue }
+                var turn = abs(shortestTurn(from: course, to: bearing))
+                if turn > 90 {
+                    bearing = wrapDegrees(bearing + 180) // the road is drawn the other way round
+                    turn = 180 - turn
+                }
+                guard turn <= roadMatchMaxAngle else { continue }
             }
             bestDistance = distance
-            best = way
+            best = RoadMatch(way: way, lat: lat + py / mPerLat, lon: lon + px / mPerLon, bearing: bearing, distance: distance)
         }
     }
     return best

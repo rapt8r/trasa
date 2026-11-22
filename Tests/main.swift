@@ -72,15 +72,16 @@ precondition(!cs.driving && cs.blend == 0)
 cs.update(fix(1, 3, 90))
 precondition(!cs.driving && cs.heading == 90, "between thresholds: still top-down, heading follows")
 cs.update(fix(2, 10, 100))
-precondition(cs.driving && cs.heading == 100 && cs.blend == 0.25, "enters driving, view changes gradually")
+precondition(cs.driving && cs.targetHeading == 100 && cs.blend == 0.25, "enters driving, view changes gradually")
+precondition(cs.heading > 90 && cs.heading < 100, "the map turns towards the new course gradually: \(cs.heading)")
 for i in 3..<8 { cs.update(fix(Double(i), 10, 100)) }
 precondition(cs.blend == 1)
 var spec = cs.spec(for: fix(8, 10, 100))
-precondition(spec.pitch == cameraDrivingPitch && spec.heading == 100 && spec.lon > 21)
+precondition(spec.pitch == cameraDrivingPitch && abs(spec.heading - 100) < 0.01 && spec.lon > 21, "heading settles: \(spec.heading)")
 precondition(abs(spec.distance - (cameraDrivingDistance + 10 * cameraDistancePerSpeed)) < 1e-6)
 
 cs.update(fix(10, 0.2, 250))
-precondition(cs.driving && cs.heading == 100, "course at near-zero speed is ignored")
+precondition(cs.driving && cs.targetHeading == 100 && abs(cs.heading - 100) < 0.01, "course at near-zero speed is ignored")
 cs.update(fix(12, 0.2, nil))
 precondition(cs.driving, "short slow-down keeps the driving view")
 cs.update(fix(13, 12, 100))
@@ -92,7 +93,7 @@ precondition(!cs.driving && cs.blend == 0.625, "drops to top-down after the dwel
 for i in 20..<25 { cs.update(fix(Double(i), 0, nil)) }
 spec = cs.spec(for: fix(25, 0, nil))
 precondition(cs.blend == 0 && spec.pitch == 0 && spec.lat == 52 && spec.lon == 21)
-precondition(spec.heading == 100 && spec.distance == cameraOverheadDistance, "top-down keeps the heading")
+precondition(abs(spec.heading - 100) < 0.01 && spec.distance == cameraOverheadDistance, "top-down keeps the heading")
 // Camera blend is time-based: ten 0.1 s samples change the view as much as one 1 s fix
 var fast = CameraState()
 fast.update(fix(0, 10, 90))
@@ -139,10 +140,14 @@ precondition(ways.count == 2 && ways[0].limit == 70 && ways[0].name == "Wschodni
 precondition(parseWays(Data("oops".utf8)) == nil && parseWays(Data(#"{"elements":[]}"#.utf8))!.isEmpty)
 // At the crossing: 5 m north of the east-west road, 3 m east of the north-south road
 let nearLat = 52.0 + 5 / 111_320.0, nearLon = 21.0 + 3 / (111_320.0 * cos(52.0 * Double.pi / 180))
-precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: 92)?.name == "Wschodnia", "heading east")
-precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: 268)?.name == "Wschodnia", "heading west")
-precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: 5)?.name == "Polnocna", "heading north")
-precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: nil)?.name == "Polnocna", "no course: nearest")
+let east = matchRoad(ways, lat: nearLat, lon: nearLon, course: 92)!
+precondition(east.way.name == "Wschodnia" && abs(east.bearing - 90) < 1, "heading east: \(east.bearing)")
+precondition(abs(east.lat - 52.0) < 1e-7 && abs(east.lon - nearLon) < 1e-7 && abs(east.distance - 5) < 0.1, "snapped onto the centre line")
+let west = matchRoad(ways, lat: nearLat, lon: nearLon, course: 268)!
+precondition(west.way.name == "Wschodnia" && abs(west.bearing - 270) < 1, "heading west: \(west.bearing)")
+let north = matchRoad(ways, lat: nearLat, lon: nearLon, course: 5)!
+precondition(north.way.name == "Polnocna" && abs(north.lon - 21.0) < 1e-7 && (north.bearing < 1 || north.bearing > 359), "heading north")
+precondition(matchRoad(ways, lat: nearLat, lon: nearLon, course: nil)?.way.name == "Polnocna", "no course: nearest")
 precondition(matchRoad(ways, lat: 52.005, lon: 21.005, course: 90) == nil, "500 m from any road")
 precondition(matchRoad([], lat: 52, lon: 21, course: nil) == nil)
 
@@ -177,4 +182,14 @@ turn.feed(TrackPoint(t: Date(timeIntervalSince1970: 1), lat: 52, lon: 21, alt: 0
 _ = turn.step(0.1)
 let turned = turn.point!.course!
 precondition(turned > 350 || turned < 10, "course turns through north, not the long way: \(turned)")
+// Spring: eases in and out, settles on the target, never overshoots
+var sv = 0.0, sVel = 0.0, sPeak = 0.0, sFirst = 0.0
+for i in 0..<120 {
+    springStep(&sv, &sVel, to: 10, smoothTime: 0.5, dt: 1.0 / 60)
+    if i == 0 { sFirst = sv }
+    sPeak = max(sPeak, sv)
+}
+precondition(sFirst < 0.05, "starts gently: \(sFirst)")
+precondition(abs(sv - 10) < 0.05 && sPeak <= 10.0001, "arrives without overshoot: \(sv) peak \(sPeak)")
+precondition(shortestTurn(from: 350, to: 10) == 20 && shortestTurn(from: 10, to: 350) == -20 && wrapDegrees(-10) == 350 && wrapDegrees(370) == 10)
 print("OK")

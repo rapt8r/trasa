@@ -15,6 +15,7 @@ final class RoadInfo: ObservableObject {
     static let prefetchDistance = 1_500.0    // m ahead along the course
     static let geocodeInterval = 20.0        // s; Apple throttles reverse geocoding
     static let geocodeDistance = 150.0       // m
+    static let snapMinSpeed = 2.0            // m/s; a parked car stays where GPS puts it
 
     @Published var speedLimit: Int?
     @Published var street: String?
@@ -49,7 +50,7 @@ final class RoadInfo: ObservableObject {
             // ponytail: linear scan over every road segment of the tile once a second; add a grid index if it shows up in profiling.
             var limit: Int?
             if let ways = tiles[tile] {
-                limit = matchRoad(ways, lat: p.lat, lon: p.lon, course: p.course)?.limit
+                limit = matchRoad(ways, lat: p.lat, lon: p.lon, course: p.course)?.way.limit
             }
             if let limit {
                 lastMatch = now
@@ -62,6 +63,19 @@ final class RoadInfo: ObservableObject {
         }
 
         geocode(p, now: now)
+    }
+
+    /// The fix moved onto the road it is most likely on, facing along it. Display only: recordings
+    /// keep raw GPS. Returns the fix unchanged when no road data is loaded or nothing matches.
+    func snapped(_ p: TrackPoint) -> TrackPoint {
+        guard let course = p.course, (p.speed ?? 0) >= Self.snapMinSpeed,
+              let ways = tiles[RoadTile(lat: p.lat, lon: p.lon)],
+              let match = matchRoad(ways, lat: p.lat, lon: p.lon, course: course) else { return p }
+        var out = p
+        out.lat = match.lat
+        out.lon = match.lon
+        out.course = match.bearing
+        return out
     }
 
     private func load(_ tile: RoadTile) {

@@ -59,17 +59,19 @@ struct SpeedLimitSign: View {
     }
 }
 
-/// Position marker: an arrow that points where the car is heading.
+/// Position marker in the style of Maps navigation: a blue arrow on a white disc.
 struct Puck: View {
     var body: some View {
         ZStack {
-            Circle().fill(.white).frame(width: 40, height: 40)
-            Circle().fill(.blue).frame(width: 32, height: 32)
+            Circle().fill(.blue.opacity(0.18)).frame(width: 74, height: 74)
+            Circle()
+                .fill(.white)
+                .frame(width: 46, height: 46)
+                .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
             Image(systemName: "location.north.fill")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(.blue)
         }
-        .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
     }
 }
 
@@ -78,16 +80,68 @@ struct Puck: View {
 struct RecordView: View {
     @EnvironmentObject var recorder: Recorder
     @StateObject private var road = RoadInfo()
-    @StateObject private var motion = Motion()
+    // Not observed here on purpose: it changes every frame, and only MapLayer needs to redraw then.
+    @State private var motion = Motion()
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(Prefs.speedLimits) private var useRoadData = true
+    @State private var detent = DriveSheet.compactDetent
+    @State private var path: [Route] = []
+    @State private var recenterRequests = 0
+
+    var body: some View {
+        MapLayer(motion: motion, recenterRequests: recenterRequests)
+            .overlay(alignment: .topLeading) {
+                if let limit = road.speedLimit {
+                    SpeedLimitSign(limit: limit).padding(12)
+                }
+            }
+            .onAppear {
+                recorder.requestPermission()
+                motion.setRunning(true)
+            }
+            .onChange(of: scenePhase) { motion.setRunning(scenePhase == .active) }
+            .onChange(of: recorder.live?.t) {
+                guard let p = recorder.live else {
+                    motion.feed(nil)
+                    return
+                }
+                road.update(p, limitsEnabled: useRoadData)
+                motion.feed(useRoadData ? road.snapped(p) : p)
+            }
+            .onChange(of: recorder.replayRate) { motion.rate = recorder.isReplaying ? recorder.replayRate : 1 }
+            .onChange(of: recorder.isReplaying) {
+                motion.rate = recorder.isReplaying ? recorder.replayRate : 1
+                if recorder.isReplaying {
+                    path = []
+                    detent = DriveSheet.compactDetent
+                    recenterRequests += 1
+                }
+            }
+            .sheet(isPresented: .constant(true)) {
+                DriveSheet(detent: $detent, path: $path, street: road.street)
+                    .environmentObject(recorder)
+                    .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
+                    .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(.regularMaterial)
+                    .interactiveDismissDisabled()
+                    .preferredColorScheme(.dark)
+            }
+    }
+}
+
+/// The map, the marker and the follow camera. Redraws every frame while the car moves, so it is
+/// kept apart from the sheet and the rest of the screen.
+struct MapLayer: View {
+    @ObservedObject var motion: Motion
+    /// Bumped by the parent to make the camera follow the car again.
+    let recenterRequests: Int
+    @EnvironmentObject var recorder: Recorder
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage(Prefs.speedLimits) private var showSpeedLimits = true
     @AppStorage(Prefs.traffic) private var showTraffic = true
     @State private var camera: MapCameraPosition = .userLocation(fallback: .automatic)
     @State private var follow = CameraState()
     @State private var recenter = false
-    @State private var detent = DriveSheet.compactDetent
-    @State private var path: [Route] = []
 
     var body: some View {
         Map(position: $camera) {
@@ -108,11 +162,6 @@ struct RecordView: View {
         .mapStyle(.standard(elevation: .realistic, pointsOfInterest: .excludingAll, showsTraffic: showTraffic))
         // The sheet's resting height never changes, so the map is laid out once and never resizes.
         .safeAreaPadding(.bottom, DriveSheet.compactHeight)
-        .overlay(alignment: .topLeading) {
-            if let limit = road.speedLimit {
-                SpeedLimitSign(limit: limit).padding(12)
-            }
-        }
         .overlay(alignment: .bottomTrailing) {
             if camera.positionedByUser {
                 Button {
@@ -129,35 +178,8 @@ struct RecordView: View {
                 .padding(.bottom, DriveSheet.compactHeight + 12)
             }
         }
-        .onAppear {
-            recorder.requestPermission()
-            motion.setRunning(true)
-        }
-        .onChange(of: scenePhase) { motion.setRunning(scenePhase == .active) }
-        .onChange(of: recorder.live?.t) {
-            motion.feed(recorder.live)
-            if let p = recorder.live { road.update(p, limitsEnabled: showSpeedLimits) }
-        }
-        .onChange(of: recorder.replayRate) { motion.rate = recorder.isReplaying ? recorder.replayRate : 1 }
-        .onChange(of: recorder.isReplaying) {
-            motion.rate = recorder.isReplaying ? recorder.replayRate : 1
-            if recorder.isReplaying {
-                path = []
-                detent = DriveSheet.compactDetent
-                recenter = true
-            }
-        }
         .onChange(of: motion.point?.t) { moveCamera() }
-        .sheet(isPresented: .constant(true)) {
-            DriveSheet(detent: $detent, path: $path, street: road.street)
-                .environmentObject(recorder)
-                .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
-                .presentationBackgroundInteraction(.enabled(upThrough: .medium))
-                .presentationDragIndicator(.visible)
-                .presentationBackground(.regularMaterial)
-                .interactiveDismissDisabled()
-                .preferredColorScheme(.dark)
-        }
+        .onChange(of: recenterRequests) { recenter = true }
     }
 
     /// Called for every frame Motion produces; marker and camera move together, so nothing jitters.
@@ -312,14 +334,23 @@ struct DriveSheet: View {
     }
 
     private var replayControls: some View {
-        HStack(spacing: 12) {
-            Picker("Tempo odtwarzania", selection: $recorder.replayRate) {
-                Text("1×").tag(1.0)
-                Text("2×").tag(2.0)
-                Text("5×").tag(5.0)
-                Text("10×").tag(10.0)
+        HStack(spacing: 8) {
+            ForEach([1.0, 2.0, 5.0, 10.0], id: \.self) { rate in
+                let selected = recorder.replayRate == rate
+                Button {
+                    recorder.replayRate = rate
+                } label: {
+                    Text("\(Int(rate))×")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(selected ? Color.blue : Color.white.opacity(0.12), in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Tempo \(Int(rate)) razy")
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
-            .pickerStyle(.segmented)
             Button {
                 recorder.stopReplay()
             } label: {
@@ -464,9 +495,9 @@ struct SettingsView: View {
                 Text("Koszt przejazdu to szacunek: dystans × spalanie × cena.")
             }
             Section {
-                Toggle("Znaki ograniczeń prędkości", isOn: $showSpeedLimits)
+                Toggle("Dane o drogach", isOn: $showSpeedLimits)
             } footer: {
-                Text("Źródło: OpenStreetMap. Aplikacja pobiera całe kwadraty mapy (ok. 2 × 3 km) i trzyma je w telefonie, więc serwer zna tylko przybliżoną okolicę, nie Twoją trasę.")
+                Text("Znaki ograniczeń prędkości i przyciąganie pozycji do drogi. Źródło: OpenStreetMap. Aplikacja pobiera całe kwadraty mapy (ok. 2 × 3 km) i trzyma je w telefonie, więc serwer zna tylko przybliżoną okolicę, nie Twoją trasę.")
             }
             Section {
                 Toggle("Natężenie ruchu", isOn: $showTraffic)
