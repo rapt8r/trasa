@@ -196,7 +196,9 @@ struct CameraState {
 
     func spec(for p: TrackPoint) -> CameraSpec {
         let drivingDistance = cameraDrivingDistance + (p.speed ?? 0) * cameraDistancePerSpeed
-        let aim = destination(lat: p.lat, lon: p.lon, bearing: heading, distance: cameraLookAhead * blend)
+        let aim = blend > 0
+            ? destination(lat: p.lat, lon: p.lon, bearing: heading, distance: cameraLookAhead * blend)
+            : (lat: p.lat, lon: p.lon)
         return CameraSpec(lat: aim.lat,
                           lon: aim.lon,
                           distance: cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * blend,
