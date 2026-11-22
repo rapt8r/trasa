@@ -101,10 +101,11 @@ struct RecordView: View {
                 UserAnnotation()
             }
             if recorder.points.count > 1 {
-                MapPolyline(coordinates: recorder.points.map(\.coordinate)).stroke(.blue, lineWidth: 6)
+                MapPolyline(coordinates: recorder.points.map(\.coordinate)).stroke(.blue, lineWidth: 8)
             }
         }
-        .mapStyle(.standard(elevation: .realistic, showsTraffic: showTraffic))
+        // No points of interest: while driving, shops and restaurants are clutter.
+        .mapStyle(.standard(elevation: .realistic, pointsOfInterest: .excludingAll, showsTraffic: showTraffic))
         // The sheet's resting height never changes, so the map is laid out once and never resizes.
         .safeAreaPadding(.bottom, DriveSheet.compactHeight)
         .overlay(alignment: .topLeading) {
@@ -112,7 +113,7 @@ struct RecordView: View {
                 SpeedLimitSign(limit: limit).padding(12)
             }
         }
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .bottomTrailing) {
             if camera.positionedByUser {
                 Button {
                     moveCamera(force: true)
@@ -124,20 +125,8 @@ struct RecordView: View {
                         .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
                 }
                 .accessibilityLabel("Wróć do mojej pozycji")
-                .padding(12)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if let street = road.street {
-                Text(street)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(.regularMaterial, in: Capsule())
-                    .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
-                    .accessibilityLabel("Ulica \(street)")
-                    .padding(.bottom, DriveSheet.compactHeight + 12)
+                .padding(.trailing, 12)
+                .padding(.bottom, DriveSheet.compactHeight + 12)
             }
         }
         .onAppear {
@@ -160,7 +149,7 @@ struct RecordView: View {
         }
         .onChange(of: motion.point?.t) { moveCamera() }
         .sheet(isPresented: .constant(true)) {
-            DriveSheet(detent: $detent, path: $path)
+            DriveSheet(detent: $detent, path: $path, street: road.street)
                 .environmentObject(recorder)
                 .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
                 .presentationBackgroundInteraction(.enabled(upThrough: .medium))
@@ -195,12 +184,16 @@ struct RecordView: View {
 /// saved trips, statistics and settings at full height.
 struct DriveSheet: View {
     // ponytail: fixed resting height; measure the content instead if the largest text sizes clip it.
-    static let compactHeight: CGFloat = 176
+    static let compactHeight: CGFloat = 190
+    /// Height of the home-indicator strip under the resting sheet; the list must start below it,
+    /// or its first rows peek out under the controls.
+    static let homeIndicatorStrip: CGFloat = 40
     static let compactDetent = PresentationDetent.height(compactHeight)
 
     @EnvironmentObject var recorder: Recorder
     @Binding var detent: PresentationDetent
     @Binding var path: [Route]
+    let street: String?
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
 
@@ -210,8 +203,8 @@ struct DriveSheet: View {
             VStack(spacing: 0) {
                 hud(stats)
                     .padding(.horizontal, 20)
-                    .padding(.top, 22)
-                    .padding(.bottom, 12)
+                    .padding(.top, 24)
+                    .frame(height: Self.compactHeight + Self.homeIndicatorStrip, alignment: .top)
                 List {
                     currentTrip(stats)
                     savedTrips
@@ -222,6 +215,7 @@ struct DriveSheet: View {
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                .contentMargins(.top, 0, for: .scrollContent)
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Route.self) { route in
@@ -249,22 +243,36 @@ struct DriveSheet: View {
         }
     }
 
+    private var statusTitle: String {
+        if let street { return street }
+        if recorder.isReplaying { return "Odtwarzanie" }
+        return recorder.isRecording ? "Nagrywanie" : "Gotowy do jazdy"
+    }
+
+    /// Speedometer on the left, where you are and how far you have driven next to it, controls below.
     private func hud(_ stats: TripStats) -> some View {
-        VStack(spacing: 10) {
-            HStack(alignment: .center, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
+        let progress = "\(formatKm(stats.distance)) · \(formatDuration(stats.duration))"
+        return VStack(spacing: 14) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(spacing: -2) {
                     Text(String(format: "%.0f", (recorder.live?.speed ?? 0) * 3.6))
-                        .font(.system(size: 52, weight: .bold, design: .rounded))
+                        .font(.system(size: 60, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                    Text("km/h").font(.subheadline).foregroundStyle(.secondary)
+                    Text("km/h").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
                 }
+                .frame(minWidth: 100)
                 .accessibilityElement(children: .combine)
-                if recorder.isPaused {
-                    Text("PAUZA").font(.caption.bold()).foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(statusTitle)
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text(recorder.isPaused ? "Pauza · " + progress : progress)
+                        .font(.subheadline)
+                        .monospacedDigit()
+                        .foregroundStyle(recorder.isPaused ? Color.orange : Color.secondary)
                 }
                 Spacer(minLength: 0)
-                Stat(title: "Dystans", value: formatKm(stats.distance))
-                Stat(title: "Czas", value: formatDuration(stats.duration))
             }
             if recorder.denied {
                 Text("Brak dostępu do lokalizacji. Włącz go w Ustawieniach.")
@@ -312,12 +320,16 @@ struct DriveSheet: View {
                 Text("10×").tag(10.0)
             }
             .pickerStyle(.segmented)
-            Button("Zakończ") { recorder.stopReplay() }
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.capsule)
-                .tint(.red)
+            Button {
+                recorder.stopReplay()
+            } label: {
+                Text("Zakończ").font(.headline)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .tint(.red)
         }
-        .frame(minHeight: 50)
     }
 
     private func currentTrip(_ stats: TripStats) -> some View {

@@ -144,11 +144,11 @@ let cameraExitSpeed = 8.0 / 3.6       // m/s; below this for cameraExitDwell: to
 let cameraExitDwell = 4.0             // s; stops stop-and-go traffic from flipping the view
 let cameraHeadingMinSpeed = 1.5       // m/s; below this GPS course is noise, the last heading is held
 let cameraBlendTime = 4.0             // s for the full top-down <-> behind-the-marker change
-let cameraDrivingPitch = 60.0         // degrees
-let cameraDrivingDistance = 450.0     // m from camera to the point it looks at, at low speed
-let cameraDistancePerSpeed = 10.0     // extra metres of distance per m/s, so the view opens up when fast
-let cameraLookAhead = 120.0           // m ahead of the car the camera aims at; puts the marker low on screen
-let cameraOverheadDistance = 900.0    // m
+let cameraDrivingPitch = 68.0         // degrees from straight down; MapKit flattens it if the camera is far away
+let cameraDrivingDistance = 260.0     // m from camera to the point it looks at, at low speed
+let cameraDistancePerSpeed = 5.0      // extra metres of distance per m/s, so the view opens up when fast
+let cameraLookAheadFraction = 0.25    // the camera aims this share of its distance ahead of the car; puts the marker low on screen
+let cameraOverheadDistance = 650.0    // m
 
 struct CameraSpec {
     var lat: Double
@@ -201,12 +201,13 @@ struct CameraState {
 
     func spec(for p: TrackPoint) -> CameraSpec {
         let drivingDistance = cameraDrivingDistance + (p.speed ?? 0) * cameraDistancePerSpeed
+        let distance = cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * blend
         let aim = blend > 0
-            ? destination(lat: p.lat, lon: p.lon, bearing: heading, distance: cameraLookAhead * blend)
+            ? destination(lat: p.lat, lon: p.lon, bearing: heading, distance: distance * cameraLookAheadFraction * blend)
             : (lat: p.lat, lon: p.lon)
         return CameraSpec(lat: aim.lat,
                           lon: aim.lon,
-                          distance: cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * blend,
+                          distance: distance,
                           heading: heading,
                           pitch: cameraDrivingPitch * blend)
     }
