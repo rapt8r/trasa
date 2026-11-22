@@ -8,9 +8,7 @@ struct TrasaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RecordView()
-                .environmentObject(recorder)
-                .preferredColorScheme(.dark) // a dashboard: dark at all times, easier on the eyes at night
+            RecordView().environmentObject(recorder)
         }
     }
 }
@@ -49,12 +47,13 @@ struct GStat: View {
     @ObservedObject var meter: GMeter
 
     var body: some View {
-        Stat(title: "Przeciążenie", value: String(format: "%.2f g", meter.value))
+        Stat(title: "Przeciążenie", value: String(format: "%.2f g", locale: Locale.current, meter.value))
     }
 }
 
 struct SpeedLimitSign: View {
     let limit: Int
+    var exceeded = false
 
     var body: some View {
         Text("\(limit)")
@@ -63,8 +62,12 @@ struct SpeedLimitSign: View {
             .frame(width: 66, height: 66)
             .background(Circle().fill(.white))
             .overlay(Circle().strokeBorder(.red, lineWidth: 7))
-            .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
-            .accessibilityLabel("Ograniczenie prędkości \(limit) kilometrów na godzinę")
+            .shadow(color: exceeded ? Color.red.opacity(0.8) : Color.black.opacity(0.35), radius: exceeded ? 10 : 4, y: 2)
+            .scaleEffect(exceeded ? 1.2 : 1, anchor: .topLeading)
+            .animation(.easeInOut(duration: 0.3), value: exceeded)
+            .accessibilityLabel(exceeded
+                ? "Przekroczone ograniczenie prędkości \(limit) kilometrów na godzinę"
+                : "Ograniczenie prędkości \(limit) kilometrów na godzinę")
     }
 }
 
@@ -96,14 +99,22 @@ struct RecordView: View {
     @State private var detent = DriveSheet.compactDetent
     @State private var path: [Route] = []
     @State private var recenterRequests = 0
+    /// Dark where the car is: the sun is down there. Otherwise the phone's own appearance is used.
+    @State private var night = false
 
     var body: some View {
+        let over = road.speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
         MapLayer(motion: motion, recenterRequests: recenterRequests)
             .overlay(alignment: .topLeading) {
                 if let limit = road.speedLimit {
-                    SpeedLimitSign(limit: limit).padding(12)
+                    SpeedLimitSign(limit: limit, exceeded: over).padding(12)
                 }
             }
+            // Short taps for discrete events only: recording started or stopped, paused, limit crossed.
+            .sensoryFeedback(.impact(weight: .medium), trigger: recorder.isRecording)
+            .sensoryFeedback(.impact(weight: .light), trigger: recorder.isPaused)
+            .sensoryFeedback(trigger: over) { _, isOver in isOver ? .warning : nil }
+            .preferredColorScheme(night ? .dark : nil)
             .onAppear {
                 recorder.requestPermission()
                 motion.setRunning(true)
@@ -116,6 +127,8 @@ struct RecordView: View {
                 }
                 road.update(p, limitsEnabled: useRoadData)
                 motion.feed(useRoadData ? road.snapped(p) : p)
+                let dark = isNight(lat: p.lat, lon: p.lon, date: p.t)
+                if dark != night { night = dark }
             }
             .onChange(of: recorder.replayRate) { motion.rate = recorder.isReplaying ? recorder.replayRate : 1 }
             .onChange(of: recorder.isReplaying) {
@@ -128,14 +141,14 @@ struct RecordView: View {
                 }
             }
             .sheet(isPresented: .constant(true)) {
-                DriveSheet(detent: $detent, path: $path, street: road.street, gMeter: motion.gMeter)
+                DriveSheet(detent: $detent, path: $path, street: road.street, speedLimit: road.speedLimit, gMeter: motion.gMeter)
                     .environmentObject(recorder)
                     .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
                     .presentationBackgroundInteraction(.enabled(upThrough: .medium))
                     .presentationDragIndicator(.visible)
                     .presentationBackground(.regularMaterial)
                     .interactiveDismissDisabled()
-                    .preferredColorScheme(.dark)
+                    .preferredColorScheme(night ? .dark : nil)
             }
     }
 }
@@ -226,6 +239,7 @@ struct DriveSheet: View {
     @Binding var detent: PresentationDetent
     @Binding var path: [Route]
     let street: String?
+    let speedLimit: Int?
     let gMeter: GMeter
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
@@ -285,12 +299,14 @@ struct DriveSheet: View {
     /// Speedometer on the left, where you are and how far you have driven next to it, controls below.
     private func hud(_ stats: TripStats) -> some View {
         let progress = "\(formatKm(stats.distance)) · \(formatDuration(stats.duration))"
+        let over = speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
         return VStack(spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
                 VStack(spacing: -2) {
                     Text(String(format: "%.0f", (recorder.live?.speed ?? 0) * 3.6))
                         .font(.system(size: 60, weight: .bold, design: .rounded))
                         .monospacedDigit()
+                        .foregroundStyle(over ? Color.red : Color.primary) // the sign also grows: not colour alone
                     Text("km/h").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
                 }
                 .frame(minWidth: 100)
@@ -300,17 +316,25 @@ struct DriveSheet: View {
                         .font(.title3.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
-                    Text(recorder.isPaused ? "Pauza · " + progress : progress)
-                        .font(.subheadline)
-                        .monospacedDigit()
-                        .foregroundStyle(recorder.isPaused ? Color.orange : Color.secondary)
+                    // Re-checked on a timer: when GPS goes quiet nothing else would redraw this line.
+                    TimelineView(.periodic(from: .now, by: 2)) { context in
+                        statusLine(recorder.isReplaying ? .good : gpsStatus(fix: recorder.live, now: context.date),
+                                   progress: progress)
+                    }
                 }
                 Spacer(minLength: 0)
             }
             if recorder.denied {
-                Text("Brak dostępu do lokalizacji. Włącz go w Ustawieniach.")
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                HStack(spacing: 12) {
+                    Text("Journey potrzebuje dostępu do lokalizacji, żeby pokazać i nagrać trasę.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Otwórz Ustawienia") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                }
             } else if let error = recorder.error {
                 Text(error).font(.footnote).foregroundStyle(.red)
             } else if recorder.isReplaying {
@@ -318,6 +342,26 @@ struct DriveSheet: View {
             } else {
                 recordControls
             }
+        }
+    }
+
+    /// Trip progress, or what is wrong with the position: said in words and a symbol, not only in colour.
+    @ViewBuilder
+    private func statusLine(_ status: GPSStatus, progress: String) -> some View {
+        switch status {
+        case .good:
+            Text(recorder.isPaused ? "Pauza · " + progress : progress)
+                .font(.subheadline)
+                .monospacedDigit()
+                .foregroundStyle(recorder.isPaused ? Color.orange : Color.secondary)
+        case .weak:
+            Label("Słaby sygnał GPS", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.orange)
+        case .searching:
+            Label("Szukam sygnału GPS", systemImage: "location.slash.fill")
+                .font(.subheadline)
+                .foregroundStyle(.orange)
         }
     }
 
@@ -337,7 +381,9 @@ struct DriveSheet: View {
                 bigButton(recorder.isPaused ? "Wznów" : "Pauza", tint: .orange) {
                     if recorder.isPaused { recorder.resume() } else { recorder.pause() }
                 }
-                bigButton("Stop", tint: .red) { recorder.stop() }
+                bigButton("Stop", tint: .red) {
+                    if let saved = recorder.stop() { path = [.trip(saved)] }
+                }
             } else {
                 bigButton("Start", tint: .green) { recorder.start() }
             }
@@ -355,8 +401,8 @@ struct DriveSheet: View {
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .frame(height: 44)
-                        .background(selected ? Color.blue : Color.white.opacity(0.12), in: Capsule())
-                        .foregroundStyle(.white)
+                        .background(selected ? Color.blue : Color.primary.opacity(0.1), in: Capsule())
+                        .foregroundStyle(selected ? Color.white : Color.primary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Tempo \(Int(rate)) razy")

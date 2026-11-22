@@ -37,7 +37,10 @@ let g = gpx(moving)
 precondition(g.contains("<trkpt lat=\"52.001\" lon=\"21.0\">") && g.contains("<time>1970-01-01T00:00:05Z</time>"))
 precondition(g.components(separatedBy: "<trkpt").count == 4)
 
-precondition(formatDuration(3725) == "1:02:05" && formatKm(12345) == "12.35 km" && formatKmh(10) == "36 km/h")
+let posix = Locale(identifier: "en_US_POSIX"), polish = Locale(identifier: "pl_PL")
+precondition(formatDuration(3725) == "1:02:05" && formatKmh(10) == "36 km/h")
+precondition(formatKm(12346, locale: posix) == "12.35 km", formatKm(12346, locale: posix))
+precondition(formatKm(9560, locale: polish) == "9,56 km", "numbers follow the region: " + formatKm(9560, locale: polish))
 precondition(compass(0) == "N" && compass(359) == "N" && compass(45) == "NE" && compass(180) == "S")
 precondition(compass(271) == "W" && compass(-90) == "W" && compass(.nan) == "–")
 let rows = csv(moving).split(separator: "\n")
@@ -108,7 +111,8 @@ precondition(nextReplayClock(gapped, index: 4, clock: Date(timeIntervalSince1970
 
 // Fuel cost
 precondition(fuelUsed(distance: 50_000, per100: 8) == 4 && fuelUsed(distance: -1, per100: 8) == 0 && fuelUsed(distance: 1000, per100: -3) == 0)
-precondition(formatCost(26) == "26.00 zł" && formatLitres(4.04) == "4.0 l")
+precondition(formatCost(26, locale: posix) == "26.00 zł" && formatLitres(4.04, locale: posix) == "4.0 l")
+precondition(formatCost(4.5, locale: polish) == "4,50 zł", formatCost(4.5, locale: polish))
 
 // Weekly / monthly statistics
 var cal = Calendar(identifier: .gregorian)
@@ -215,6 +219,33 @@ precondition(parkedCar.point!.course == 90 && parkedCar.point!.lat == 52, "compa
 parkedCar.feed(drive(1, speed: 10, course: 0))
 for _ in 0..<120 { _ = parkedCar.step(1.0 / 60, yawRate: 0, compass: 90) }
 precondition(parkedCar.point!.course! < 5 || parkedCar.point!.course! > 355, "moving: GPS course wins over the compass: \(parkedCar.point!.course!)")
+
+// Speed against the limit
+precondition(!isOverLimit(speed: 50 / 3.6, limit: 50) && !isOverLimit(speed: 52.9 / 3.6, limit: 50), "small excess is tolerated")
+precondition(isOverLimit(speed: 54 / 3.6, limit: 50) && !isOverLimit(speed: nil, limit: 50))
+
+// GPS status
+let nowish = Date(timeIntervalSince1970: 1000)
+func fixAged(_ age: Double, acc: Double) -> TrackPoint {
+    TrackPoint(t: nowish.addingTimeInterval(-age), lat: 52, lon: 21, alt: 0, speed: 0, course: nil, hAcc: acc)
+}
+precondition(gpsStatus(fix: nil, now: nowish) == .searching && gpsStatus(fix: fixAged(6, acc: 5), now: nowish) == .searching)
+precondition(gpsStatus(fix: fixAged(1, acc: 5), now: nowish) == .good && gpsStatus(fix: fixAged(1, acc: 40), now: nowish) == .weak)
+
+// Sun: day and night at the car's position
+var utc = Calendar(identifier: .gregorian)
+utc.timeZone = TimeZone(identifier: "UTC")!
+func at(_ month: Int, _ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+    utc.date(from: DateComponents(year: 2026, month: month, day: day, hour: hour, minute: minute))!
+}
+let midsummerNoon = solarElevation(lat: 52.23, lon: 21.01, date: at(6, 21, 10, 38))
+precondition(abs(midsummerNoon - 61.2) < 1.5, "Warsaw, solar noon, 21 June: \(midsummerNoon)")
+let midwinterNoon = solarElevation(lat: 52.23, lon: 21.01, date: at(12, 21, 10, 35))
+precondition(abs(midwinterNoon - 14.3) < 1.5, "Warsaw, solar noon, 21 December: \(midwinterNoon)")
+precondition(isNight(lat: 52.23, lon: 21.01, date: at(11, 22, 21, 0)), "a November evening is night")
+precondition(!isNight(lat: 52.23, lon: 21.01, date: at(11, 22, 11, 0)), "late morning is day")
+precondition(!isNight(lat: 52.23, lon: 21.01, date: at(6, 21, 17, 0)) && isNight(lat: 52.23, lon: 21.01, date: at(6, 21, 23, 0)))
+precondition(isNight(lat: -33.87, lon: 151.21, date: at(6, 21, 12, 0)), "Sydney at 22:00 local")
 
 // Spring: eases in and out, settles on the target, never overshoots
 var sv = 0.0, sVel = 0.0, sPeak = 0.0, sFirst = 0.0

@@ -133,7 +133,7 @@ func formatDuration(_ seconds: Double) -> String {
     return String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
 }
 
-func formatKm(_ metres: Double) -> String { String(format: "%.2f km", metres / 1000) }
+func formatKm(_ metres: Double, locale: Locale = .current) -> String { String(format: "%.2f km", locale: locale, metres / 1000) }
 func formatKmh(_ mps: Double) -> String { String(format: "%.0f km/h", mps * 3.6) }
 
 // MARK: Follow camera (pure logic; the view turns CameraSpec into a MapCamera)
@@ -360,8 +360,8 @@ struct MotionSmoother {
 
 /// Litres used over `distance` metres at `per100` l/100 km.
 func fuelUsed(distance: Double, per100: Double) -> Double { max(0, distance) / 100_000 * max(0, per100) }
-func formatLitres(_ litres: Double) -> String { String(format: "%.1f l", litres) }
-func formatCost(_ zloty: Double) -> String { String(format: "%.2f zł", max(0, zloty)) }
+func formatLitres(_ litres: Double, locale: Locale = .current) -> String { String(format: "%.1f l", locale: locale, litres) }
+func formatCost(_ zloty: Double, locale: Locale = .current) -> String { String(format: "%.2f zł", locale: locale, max(0, zloty)) }
 
 // MARK: Statistics per week / month
 
@@ -509,4 +509,49 @@ func matchRoad(_ ways: [RoadWay], lat: Double, lon: Double, course: Double?) -> 
         }
     }
     return best
+}
+
+// MARK: What the screen should react to
+
+let speedLimitTolerance = 3.0 // km/h over the limit before the speed is flagged; GPS speed wobbles by a little
+
+func isOverLimit(speed: Double?, limit: Int) -> Bool {
+    guard let speed else { return false }
+    return speed * 3.6 > Double(limit) + speedLimitTolerance
+}
+
+enum GPSStatus {
+    case good
+    case weak       // a fix, but a rough one
+    case searching  // no recent fix
+}
+
+let gpsStaleAfter = 5.0     // s without a fix
+let gpsWeakAccuracy = 30.0  // m
+
+func gpsStatus(fix: TrackPoint?, now: Date) -> GPSStatus {
+    guard let fix, now.timeIntervalSince(fix.t) <= gpsStaleAfter else { return .searching }
+    return fix.hAcc > gpsWeakAccuracy ? .weak : .good
+}
+
+let nightSunElevation = -4.0 // degrees; the sun this far below the horizon counts as night (dusk is already dark on the road)
+
+/// Height of the sun above the horizon in degrees, good to about a degree (low-precision almanac formulas).
+func solarElevation(lat: Double, lon: Double, date: Date) -> Double {
+    let rad = Double.pi / 180
+    let n = (date.timeIntervalSince1970 - 946_728_000) / 86_400 // days since 2000-01-01 12:00 UTC
+    let meanLongitude = 280.460 + 0.9856474 * n
+    let anomaly = (357.528 + 0.9856003 * n) * rad
+    let ecliptic = (meanLongitude + 1.915 * sin(anomaly) + 0.020 * sin(2 * anomaly)) * rad
+    let obliquity = (23.439 - 0.0000004 * n) * rad
+    let declination = asin(sin(obliquity) * sin(ecliptic))
+    let rightAscension = atan2(cos(obliquity) * sin(ecliptic), cos(ecliptic))
+    let siderealDegrees = (18.697374558 + 24.06570982441908 * n) * 15 + lon
+    let hourAngle = siderealDegrees * rad - rightAscension
+    let phi = lat * rad
+    return asin(sin(phi) * sin(declination) + cos(phi) * cos(declination) * cos(hourAngle)) / rad
+}
+
+func isNight(lat: Double, lon: Double, date: Date) -> Bool {
+    solarElevation(lat: lat, lon: lon, date: date) < nightSunElevation
 }

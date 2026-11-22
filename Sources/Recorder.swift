@@ -91,15 +91,20 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
         manager.startUpdatingLocation()
     }
 
-    func stop() {
+    /// Ends the recording. Returns the saved trip's file, or nil when nothing was recorded.
+    @discardableResult
+    func stop() -> URL? {
+        guard isRecording else { return nil }
         manager.allowsBackgroundLocationUpdates = false // GPS stays on for the map, but only in the foreground
         try? file?.close()
         file = nil
         isRecording = false
         isPaused = false
         UIApplication.shared.isIdleTimerDisabled = false
+        let saved = points.isEmpty ? nil : fileURL
         if points.isEmpty, let fileURL { try? FileManager.default.removeItem(at: fileURL) }
         loadTrips()
+        return saved
     }
 
     // MARK: Replay (nothing is written to disk)
