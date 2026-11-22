@@ -34,8 +34,9 @@ struct Stat: View {
 
     var body: some View {
         VStack(spacing: 2) {
-            Text(value).font(.headline).monospacedDigit()
-            Text(title).font(.caption).foregroundStyle(.secondary)
+            // Four tiles share a row on a narrow phone: shrink a little before truncating.
+            Text(value).font(.headline).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
@@ -47,7 +48,7 @@ struct GStat: View {
     @ObservedObject var meter: GMeter
 
     var body: some View {
-        Stat(title: "Przeciążenie", value: String(format: "%.2f g", locale: Locale.current, meter.value))
+        Stat(title: "Siła G", value: String(format: "%.2f g", locale: Locale.current, meter.value))
     }
 }
 
