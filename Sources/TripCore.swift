@@ -169,6 +169,7 @@ let cameraDrivingDistance = 260.0     // m from camera to the point it looks at,
 let cameraDistancePerSpeed = 5.0      // extra metres of distance per m/s, so the view opens up when fast
 let cameraLookAheadFraction = 0.25    // the camera aims this share of its distance ahead of the car; puts the marker low on screen
 let cameraOverheadDistance = 650.0    // m
+let cameraNoticeLift = 0.2            // share of the look-ahead given up while a notice sits above the sheet, which raises the marker clear of it
 
 /// One step of a critically damped spring: starts gently, arrives gently, never overshoots.
 /// `smoothTime` is roughly how long it takes to get there.
@@ -260,12 +261,14 @@ struct CameraState {
         blend = driving ? min(1, blend + step) : max(0, blend - step)
     }
 
-    func spec(for p: TrackPoint) -> CameraSpec {
+    /// - lift: 0...1, how much room to leave under the marker for a notice above the sheet.
+    func spec(for p: TrackPoint, lift: Double = 0) -> CameraSpec {
         let eased = blend * blend * (3 - 2 * blend) // ease in, ease out
         let drivingDistance = cameraDrivingDistance + (p.speed ?? 0) * cameraDistancePerSpeed
         let distance = cameraOverheadDistance + (drivingDistance - cameraOverheadDistance) * eased
         let aim = eased > 0
-            ? destination(lat: p.lat, lon: p.lon, bearing: heading, distance: distance * cameraLookAheadFraction * eased)
+            ? destination(lat: p.lat, lon: p.lon, bearing: heading,
+                          distance: distance * cameraLookAheadFraction * (1 - cameraNoticeLift * min(1, max(0, lift))) * eased)
             : (lat: p.lat, lon: p.lon)
         return CameraSpec(lat: aim.lat,
                           lon: aim.lon,

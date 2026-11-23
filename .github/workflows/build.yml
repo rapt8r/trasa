@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Core logic check
-        run: swiftc -swift-version 5 Sources/TripCore.swift Tests/main.swift -o check && ./check
+        run: swiftc -swift-version 5 Sources/TripCore.swift Sources/OBDCore.swift Tests/main.swift -o check && ./check
       - name: Generate Xcode project
         run: brew install xcodegen && xcodegen generate
       - name: Build (unsigned)

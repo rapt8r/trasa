@@ -24,4 +24,10 @@ dopisywany na bieżąco, więc przerwanie działania aplikacji nie kasuje nagran
 
 ## Test logiki
 
-`swiftc -swift-version 5 Sources/TripCore.swift Tests/main.swift -o check && ./check`
+`swiftc -swift-version 5 Sources/TripCore.swift Sources/OBDCore.swift Tests/main.swift -o check && ./check`
+
+## Samochód (OBD)
+
+Ekran "Samochód" łączy się przez Bluetooth LE z adapterem zgodnym z ELM327 w gnieździe OBD.
+Aplikacja pyta auto, które parametry obsługuje, i tylko je odczytuje. Niczego w aucie nie zmienia
+i nie kasuje kodów błędów. Dziennik połączenia zostaje w telefonie, dopóki użytkownik sam go nie wyśle.

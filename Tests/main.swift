@@ -263,4 +263,54 @@ for i in 0..<120 {
 precondition(sFirst < 0.05, "starts gently: \(sFirst)")
 precondition(abs(sv - 10) < 0.05 && sPeak <= 10.0001, "arrives without overshoot: \(sv) peak \(sPeak)")
 precondition(shortestTurn(from: 350, to: 10) == 20 && shortestTurn(from: 10, to: 350) == -20 && wrapDegrees(-10) == 350 && wrapDegrees(370) == 10)
+// A notice above the sheet: the camera aims less far ahead, which lifts the marker
+var lifted = CameraState()
+lifted.update(fix(0, 20, 90))
+for i in 1...8 { lifted.update(fix(Double(i), 20, 90)) }
+let plain = lifted.spec(for: fix(8, 20, 90)), raised = lifted.spec(for: fix(8, 20, 90), lift: 1)
+precondition(plain.lon > raised.lon && raised.lon > 21 && plain.distance == raised.distance, "lift shortens the look-ahead only")
+precondition(lifted.spec(for: fix(8, 20, 90), lift: 5).lon == raised.lon, "lift is clamped")
+
+// OBD: adapter replies
+precondition(elmLines("SEARCHING...\r41 00\r\r\n") == ["41 00"])
+let hello = parseELM("SEARCHING...\r7E8 06 41 00 BE 3F A8 13 \r7E9 06 41 00 80 00 00 01 \r\r")
+guard case .frames(let helloFrames) = hello else { preconditionFailure("0100 reply: \(hello)") }
+precondition(helloFrames == [OBDFrame(ecu: "7E8", bytes: [0x41, 0x00, 0xBE, 0x3F, 0xA8, 0x13]),
+                             OBDFrame(ecu: "7E9", bytes: [0x41, 0x00, 0x80, 0x00, 0x00, 0x01])], "two units answer")
+precondition(pidData(helloFrames, pid: 0x00, ecu: "7E8")! == [0xBE, 0x3F, 0xA8, 0x13])
+precondition(pidData(helloFrames, pid: 0x00, ecu: "7EA") == nil && pidData(helloFrames, pid: 0x0C, ecu: "7E8") == nil)
+// A short frame padded by the car: only the declared length counts
+precondition(parseELM("7E8 03 41 0D 32 AA AA AA AA") == .frames([OBDFrame(ecu: "7E8", bytes: [0x41, 0x0D, 0x32])]))
+// An answer spread over two CAN frames
+let longReply = parseELM("7E8 10 0A 43 04 01 43 01 71 \r7E8 21 03 00 04 20 00 00 00 \r")
+precondition(longReply == .frames([OBDFrame(ecu: "7E8", bytes: [0x43, 0x04, 0x01, 0x43, 0x01, 0x71, 0x03, 0x00, 0x04, 0x20])]), "\(longReply)")
+// 29-bit identifiers
+precondition(parseELM("18 DA F1 10 03 41 0D 32") == .frames([OBDFrame(ecu: "18DAF110", bytes: [0x41, 0x0D, 0x32])]))
+precondition(parseELM("NO DATA\r\r") == .failure(.noData) && parseELM("SEARCHING...\rUNABLE TO CONNECT\r") == .failure(.unableToConnect))
+precondition(parseELM("CAN ERROR") == .failure(.busError) && parseELM("?") == .failure(.unknownCommand) && parseELM("STOPPED") == .failure(.stopped))
+precondition(parseELM("ATZ\r\rELM327 v2.2\r\r") == .text(["ATZ", "ELM327 v2.2"]) && parseELM("OK") == .text(["OK"]) && parseELM("12.4V") == .text(["12.4V"]))
+precondition(parseELM("") == .text([]))
+
+// OBD: what the car supports
+precondition(supportedPIDs([0xBE, 0x3F, 0xA8, 0x13], base: 0x00)
+    == [0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x15, 0x1C, 0x1F, 0x20])
+precondition(supportedPIDs([0x80, 0x00, 0x00, 0x01], base: 0x20) == [0x21, 0x40] && supportedPIDs([0, 0, 0, 0], base: 0).isEmpty)
+precondition(supportedPIDs([0x00, 0x00, 0x00, 0x01], base: 0xE0).isEmpty, "no parameter above 0xFF")
+
+// OBD: values
+func value(_ pid: UInt8, _ data: [UInt8]) -> Double? { obdParameters[pid]?.decode(data) }
+precondition(value(0x0C, [0x1A, 0xF8]) == 1726 && value(0x0D, [0x32]) == 50 && value(0x05, [0x7B]) == 83)
+precondition(value(0x10, [0x01, 0xF4]) == 5 && value(0x42, [0x36, 0xB0]) == 14 && value(0x06, [0x80]) == 0)
+precondition(value(0x11, [0xFF]) == 100 && value(0x0F, [0x00]) == -40 && value(0x0E, [0x80]) == 0 && value(0x5E, [0x00, 0x64]) == 5)
+precondition(value(0x0C, [0x1A]) == nil && value(0x0D, []) == nil, "too few bytes is not a value")
+precondition(obdParameters[0x01] == nil && obdParameters[0x0C]!.unit == "obr./min")
+precondition(hexString([0x0C, 0xFF]) == "0C FF")
+
+// OBD: trouble codes (read only)
+precondition(decodeDTCs([0x43, 0x04, 0x01, 0x43, 0x01, 0x71, 0x03, 0x00, 0x04, 0x20]) == ["P0143", "P0171", "P0300", "P0420"])
+precondition(decodeDTCs([0x43, 0x00]).isEmpty && decodeDTCs([0x43, 0x01, 0xC1, 0x00, 0x00, 0x00]) == ["U0100"])
+precondition(decodeDTCs([0x43, 0x01, 0x51, 0x23]) == ["C1123"] && decodeDTCs([0x41, 0x00]).isEmpty && decodeDTCs([]).isEmpty)
+
+precondition(looksLikeOBDAdapter("IOS-Vlink") && looksLikeOBDAdapter("Vgate iCar2") && looksLikeOBDAdapter("OBDII"))
+precondition(!looksLikeOBDAdapter("AirPods Pro") && !looksLikeOBDAdapter("Mi Band"))
 print("OK")

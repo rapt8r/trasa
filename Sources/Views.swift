@@ -5,10 +5,12 @@ import Charts
 @main
 struct TrasaApp: App {
     @StateObject private var recorder = Recorder()
+    // Held, not observed: only the car screen redraws when car values change.
+    @State private var obd = OBDAdapter()
 
     var body: some Scene {
         WindowGroup {
-            RecordView().environmentObject(recorder)
+            RecordView(obd: obd).environmentObject(recorder)
         }
     }
 }
@@ -26,6 +28,8 @@ enum Route: Hashable {
     case trip(URL)
     case stats
     case settings
+    case car
+    case carLog
 }
 
 /// "Dziś, 18:12", "Wczoraj, 18:12", otherwise the date and time.
@@ -78,6 +82,29 @@ struct GStat: View {
     }
 }
 
+/// A short message about the drive: no fix yet, weak signal, recording paused.
+struct Notice: Equatable {
+    let icon: String
+    let text: String
+}
+
+/// Slides out from under the sheet's top edge; said with a symbol and words, not colour alone.
+struct NoticePill: View {
+    let notice: Notice
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: notice.icon).foregroundStyle(.orange)
+            Text(notice.text).font(.subheadline.weight(.semibold))
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+        .background(.regularMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct SpeedLimitSign: View {
     let limit: Int
     var exceeded = false
@@ -117,6 +144,7 @@ struct Puck: View {
 // MARK: Map screen
 
 struct RecordView: View {
+    let obd: OBDAdapter
     @EnvironmentObject var recorder: Recorder
     @StateObject private var road = RoadInfo()
     // Not observed here on purpose: it changes every frame, and only MapLayer needs to redraw then.
@@ -128,10 +156,42 @@ struct RecordView: View {
     @State private var recenterRequests = 0
     /// Dark where the car is: the sun is down there. Otherwise the phone's own appearance is used.
     @State private var night = false
+    @State private var gps = GPSStatus.good
+    // When GPS goes quiet nothing else would notice, so the fix's age is checked on a timer.
+    private let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    /// The one message worth showing right now, most urgent first.
+    private var notice: Notice? {
+        if recorder.denied { return nil } // the sheet explains that one and offers Settings
+        if !recorder.isReplaying {
+            switch gps {
+            case .searching: return Notice(icon: "location.slash.fill", text: "Szukam sygnału GPS")
+            case .weak: return Notice(icon: "exclamationmark.triangle.fill", text: "Słaby sygnał GPS")
+            case .good: break
+            }
+        }
+        if recorder.isPaused { return Notice(icon: "pause.fill", text: "Nagrywanie wstrzymane") }
+        return nil
+    }
+
+    private func refreshGPS() {
+        let now = recorder.isReplaying ? GPSStatus.good : gpsStatus(fix: recorder.live, now: Date())
+        if now != gps { gps = now }
+    }
 
     var body: some View {
         let over = road.speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
-        MapLayer(motion: motion, recenterRequests: recenterRequests)
+        let notice = self.notice
+        MapLayer(motion: motion, recenterRequests: recenterRequests, lifted: notice != nil)
+            .overlay(alignment: .bottom) {
+                if let notice {
+                    NoticePill(notice: notice)
+                        .padding(.bottom, DriveSheet.compactHeight + 10)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(duration: 0.45), value: notice)
+            .onReceive(statusTimer) { _ in refreshGPS() }
             .overlay(alignment: .topLeading) {
                 if let limit = road.speedLimit {
                     SpeedLimitSign(limit: limit, exceeded: over).padding(12)
@@ -156,6 +216,7 @@ struct RecordView: View {
                 motion.feed(useRoadData ? road.snapped(p) : p)
                 let dark = isNight(lat: p.lat, lon: p.lon, date: p.t)
                 if dark != night { night = dark }
+                refreshGPS()
             }
             .onChange(of: recorder.replayRate) { motion.rate = recorder.isReplaying ? recorder.replayRate : 1 }
             .onChange(of: recorder.isReplaying) {
@@ -170,6 +231,7 @@ struct RecordView: View {
             .sheet(isPresented: .constant(true)) {
                 DriveSheet(detent: $detent, path: $path, street: road.street, speedLimit: road.speedLimit, gMeter: motion.gMeter)
                     .environmentObject(recorder)
+                    .environmentObject(obd)
                     .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
                     .presentationBackgroundInteraction(.enabled(upThrough: .medium))
                     .presentationDragIndicator(.visible)
@@ -186,12 +248,15 @@ struct MapLayer: View {
     @ObservedObject var motion: Motion
     /// Bumped by the parent to make the camera follow the car again.
     let recenterRequests: Int
+    /// A notice sits just above the sheet: keep the marker clear of it.
+    let lifted: Bool
     @EnvironmentObject var recorder: Recorder
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(Prefs.traffic) private var showTraffic = true
     @State private var camera: MapCameraPosition = .userLocation(fallback: .automatic)
     @State private var follow = CameraState()
     @State private var recenter = false
+    @State private var lift = 0.0
 
     var body: some View {
         Map(position: $camera) {
@@ -239,10 +304,11 @@ struct MapLayer: View {
         // The user dragged the map: leave it alone until they tap the recenter button.
         guard force || recenter || !camera.positionedByUser else { return }
         recenter = false
+        lift += ((lifted ? 1 : 0) - lift) * 0.08 // eased a little every frame
         // Reduce Motion: keep following, but flat and north-up, without tilting or rotating the map.
         let spec = reduceMotion
             ? CameraSpec(lat: p.lat, lon: p.lon, distance: cameraOverheadDistance, heading: 0, pitch: 0)
-            : follow.spec(for: p)
+            : follow.spec(for: p, lift: lift)
         camera = .camera(MapCamera(centerCoordinate: CLLocationCoordinate2D(latitude: spec.lat, longitude: spec.lon),
                                    distance: spec.distance,
                                    heading: spec.heading,
@@ -285,6 +351,7 @@ struct DriveSheet: View {
                         currentTrip(stats)
                         savedTrips
                         Section {
+                            NavigationLink(value: Route.car) { Label("Samochód", systemImage: "car.side.fill") }
                             NavigationLink(value: Route.stats) { Label("Statystyki", systemImage: "chart.bar.fill") }
                             NavigationLink(value: Route.settings) { Label("Ustawienia", systemImage: "gearshape.fill") }
                         }
@@ -321,6 +388,10 @@ struct DriveSheet: View {
             StatsView()
         case .settings:
             SettingsView()
+        case .car:
+            CarView()
+        case .carLog:
+            CarLogView()
         }
     }
 
@@ -332,7 +403,6 @@ struct DriveSheet: View {
 
     /// Speedometer on the left, where you are and how far you have driven next to it, controls below.
     private func hud(_ stats: TripStats) -> some View {
-        let progress = "\(formatKm(stats.distance)) · \(formatDuration(stats.duration))"
         let over = speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
         return VStack(spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
@@ -345,16 +415,20 @@ struct DriveSheet: View {
                 }
                 .frame(minWidth: 100)
                 .accessibilityElement(children: .combine)
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
+                    // A short name is set large; a long one shrinks to fit instead of being cut off.
                     Text(statusTitle)
-                        .font(.title3.weight(.semibold))
+                        .font(.title.weight(.bold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                    // Re-checked on a timer: when GPS goes quiet nothing else would redraw this line.
-                    TimelineView(.periodic(from: .now, by: 2)) { context in
-                        statusLine(recorder.isReplaying ? .good : gpsStatus(fix: recorder.live, now: context.date),
-                                   progress: progress)
+                        .minimumScaleFactor(0.55)
+                    HStack(alignment: .firstTextBaseline, spacing: 18) {
+                        Text(formatKm(stats.distance)).accessibilityLabel("Dystans \(formatKm(stats.distance))")
+                        Text(formatDuration(stats.duration)).accessibilityLabel("Czas \(formatDuration(stats.duration))")
                     }
+                    .font(.title3.weight(.medium))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 }
                 Spacer(minLength: 0)
             }
@@ -376,26 +450,6 @@ struct DriveSheet: View {
             } else {
                 recordControls
             }
-        }
-    }
-
-    /// Trip progress, or what is wrong with the position: said in words and a symbol, not only in colour.
-    @ViewBuilder
-    private func statusLine(_ status: GPSStatus, progress: String) -> some View {
-        switch status {
-        case .good:
-            Text(recorder.isPaused ? "Pauza · " + progress : progress)
-                .font(.subheadline)
-                .monospacedDigit()
-                .foregroundStyle(recorder.isPaused ? Color.orange : Color.secondary)
-        case .weak:
-            Label("Słaby sygnał GPS", systemImage: "exclamationmark.triangle.fill")
-                .font(.subheadline)
-                .foregroundStyle(.orange)
-        case .searching:
-            Label("Szukam sygnału GPS", systemImage: "location.slash.fill")
-                .font(.subheadline)
-                .foregroundStyle(.orange)
         }
     }
 
@@ -622,6 +676,170 @@ struct StatsView: View {
     private func summary(_ period: PeriodSummary) -> String {
         let cost = fuelUsed(distance: period.distance, per100: fuelPer100) * fuelPrice
         return "\(tripsLabel(period.count)) · \(formatShortDuration(period.duration)) · \(formatCost(cost))"
+    }
+}
+
+// MARK: Car (OBD adapter)
+
+/// Finds the OBD adapter, shows what the car reports and its live values. Read-only.
+struct CarView: View {
+    @EnvironmentObject var obd: OBDAdapter
+
+    var body: some View {
+        List {
+            Section {
+                status
+                switch obd.state {
+                case .idle, .failed, .bluetoothOff, .unauthorized:
+                    Button("Szukaj adaptera") { obd.startScan() }
+                case .scanning, .connecting, .reading, .ready:
+                    Button("Rozłącz", role: .destructive) { obd.disconnect() }
+                }
+            } footer: {
+                Text("Włóż adapter w gniazdo OBD pod kierownicą i włącz zapłon. Journey tylko odczytuje dane, niczego w aucie nie zmienia.")
+            }
+
+            if obd.state == .scanning {
+                Section {
+                    if obd.devices.isEmpty {
+                        HStack(spacing: 12) {
+                            ProgressView()
+                            Text("Szukam…").foregroundStyle(.secondary)
+                        }
+                    }
+                    ForEach(obd.devices) { device in
+                        Button {
+                            obd.connect(device)
+                        } label: {
+                            HStack {
+                                Image(systemName: device.likely ? "car.side.fill" : "dot.radiowaves.left.and.right")
+                                    .foregroundStyle(device.likely ? Color.blue : Color.secondary)
+                                    .frame(width: 28)
+                                    .accessibilityHidden(true)
+                                Text(device.name).foregroundStyle(Color.primary)
+                                Spacer()
+                                if device.likely {
+                                    Text("adapter OBD").font(.footnote).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Urządzenia w pobliżu")
+                } footer: {
+                    Text("Adapter Vgate zwykle nazywa się „IOS-Vlink”. Jeśli po minucie go tu nie ma, może to być wersja Bluetooth 3.0, która nie działa z iPhonem.")
+                }
+            }
+
+            if !obd.info.isEmpty {
+                Section("Adapter i auto") {
+                    ForEach(obd.info) { row in
+                        LabeledContent(row.label, value: row.value)
+                    }
+                }
+            }
+
+            if !obd.readings.isEmpty {
+                Section {
+                    ForEach(obd.readings) { reading in
+                        readingRow(reading)
+                    }
+                } header: {
+                    Text("Parametry z auta (\(obd.readings.count))")
+                } footer: {
+                    if obd.rate > 0 {
+                        Text("Odczyt: \(String(format: "%.0f", obd.rate)) wartości na sekundę.")
+                    }
+                }
+            }
+
+            Section {
+                NavigationLink(value: Route.carLog) { Label("Dziennik połączenia", systemImage: "doc.text") }
+            } footer: {
+                Text("Dziennik pokazuje rozmowę z adapterem. Wyślij go, jeśli coś nie działa.")
+            }
+        }
+        .listSectionSpacing(.compact)
+        .contentMargins(.top, 8, for: .scrollContent)
+        .navigationTitle("Samochód")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch obd.state {
+        case .idle:
+            Label("Nie połączono", systemImage: "car.side")
+        case .bluetoothOff:
+            Label("Bluetooth jest wyłączony. Włącz go w Centrum sterowania.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        case .unauthorized:
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Journey nie ma dostępu do Bluetooth.", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Button("Otwórz Ustawienia") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            }
+        case .scanning:
+            Label("Szukam adaptera", systemImage: "dot.radiowaves.left.and.right")
+        case .connecting(let name):
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Łączę z \(name)…")
+            }
+        case .reading(let what):
+            HStack(spacing: 12) {
+                ProgressView()
+                Text(what)
+            }
+        case .ready:
+            Label("Połączono z autem", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+    }
+
+    private func readingRow(_ reading: OBDAdapter.Reading) -> some View {
+        let parameter = obdParameters[reading.pid]
+        let name = parameter?.name ?? String(format: "Parametr 0x%02X", reading.pid)
+        var text = "–"
+        if let parameter, let value = parameter.decode(reading.data) {
+            let number = String(format: "%.\(parameter.digits)f", locale: Locale.current, value)
+            text = parameter.unit.isEmpty ? number : number + " " + parameter.unit
+        } else if !reading.data.isEmpty {
+            text = hexString(reading.data) // not decoded by this version: shown as the car sent it
+        }
+        return LabeledContent(name) {
+            Text(text).monospacedDigit()
+        }
+    }
+}
+
+struct CarLogView: View {
+    @EnvironmentObject var obd: OBDAdapter
+
+    var body: some View {
+        // The log is not observed (it changes with every command), so it is re-read on a timer.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            ScrollView {
+                Text(obd.logText.isEmpty ? "Dziennik jest pusty. Połącz się z adapterem." : obd.logText)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+            }
+        }
+        .navigationTitle("Dziennik połączenia")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                ShareLink(item: obd.logText) {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .accessibilityLabel("Wyślij dziennik")
+            }
+        }
     }
 }
 
