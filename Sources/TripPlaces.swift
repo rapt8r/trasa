@@ -4,6 +4,10 @@ import Foundation
 
 /// Names of the places where saved trips start and end ("Rylsk → Rawa Mazowiecka"), looked up
 /// with Apple's geocoder once per trip and kept on the phone.
+///
+/// Privacy: a trip's ends are often someone's home or workplace, so the position sent is rounded
+/// to about a kilometre (enough for a town's name), the lookup can be switched off in Settings,
+/// and a name is forgotten as soon as its trip is deleted.
 final class TripPlaces: ObservableObject {
     struct Name: Codable {
         var from: String?
@@ -12,6 +16,7 @@ final class TripPlaces: ObservableObject {
 
     static let storeKey = "tripPlaces"
     static let pause = 1.5 // s between trips; Apple throttles reverse geocoding
+    static let coarseness = 100.0 // positions are rounded to 1/100 of a degree, roughly 1 km
 
     @Published private(set) var names: [String: Name] = [:]
 
@@ -30,14 +35,35 @@ final class TripPlaces: ObservableObject {
         names[trip.url.lastPathComponent].flatMap { tripTitle(from: $0.from, to: $0.to) }
     }
 
-    /// Looks up the trips that have no name yet, one at a time.
-    func resolve(_ trips: [Trip]) {
+    private func save() {
+        if let data = try? JSONEncoder().encode(names) {
+            UserDefaults.standard.set(data, forKey: Self.storeKey)
+        }
+    }
+
+    private func coarse(_ p: TrackPoint) -> CLLocation {
+        CLLocation(latitude: (p.lat * Self.coarseness).rounded() / Self.coarseness,
+                   longitude: (p.lon * Self.coarseness).rounded() / Self.coarseness)
+    }
+
+    /// Forgets the names of trips that no longer exist, then, when `enabled`, looks up the trips
+    /// that have no name yet, one at a time.
+    func resolve(_ trips: [Trip], enabled: Bool) {
+        let existing = Set(trips.map { $0.url.lastPathComponent })
+        if names.keys.contains(where: { !existing.contains($0) }) {
+            names = names.filter { existing.contains($0.key) }
+            save()
+        }
+        queue.removeAll { !existing.contains($0.key) }
+        guard enabled else {
+            queue.removeAll()
+            return
+        }
         for trip in trips {
             let key = trip.url.lastPathComponent
             guard names[key] == nil, !queue.contains(where: { $0.key == key }),
                   let first = trip.points.first, let last = trip.points.last else { continue }
-            queue.append((key, CLLocation(latitude: first.lat, longitude: first.lon),
-                          CLLocation(latitude: last.lat, longitude: last.lon)))
+            queue.append((key, coarse(first), coarse(last)))
         }
         next()
     }
@@ -54,9 +80,10 @@ final class TripPlaces: ObservableObject {
                 return
             }
             self.place(job.end) { to in
-                self.names[job.key] = Name(from: from, to: to)
-                if let data = try? JSONEncoder().encode(self.names) {
-                    UserDefaults.standard.set(data, forKey: Self.storeKey)
+                // The trip may have been deleted, or the lookup switched off, while this was under way.
+                if self.queue.contains(where: { $0.key == job.key }) {
+                    self.names[job.key] = Name(from: from, to: to)
+                    self.save()
                 }
                 self.queue.removeAll { $0.key == job.key }
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.pause) {

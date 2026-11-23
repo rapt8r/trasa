@@ -156,6 +156,10 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     func delete(_ trip: Trip) {
         try? FileManager.default.removeItem(at: trip.url)
+        // Export copies (GPX, CSV) made for sharing go with it.
+        let exported = FileManager.default.temporaryDirectory
+            .appendingPathComponent(trip.url.deletingPathExtension().lastPathComponent)
+        for ext in ["gpx", "csv"] { try? FileManager.default.removeItem(at: exported.appendingPathExtension(ext)) }
         trips.removeAll { $0.id == trip.id }
     }
 

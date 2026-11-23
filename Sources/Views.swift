@@ -22,6 +22,7 @@ enum Prefs {
     static let fuelPrice = "fuelPrice"       // zł / l
     static let speedLimits = "showSpeedLimits"
     static let traffic = "showTraffic"
+    static let placeNames = "showPlaceNames"
 }
 
 /// Screens pushed inside the bottom sheet.
@@ -430,6 +431,7 @@ struct DriveSheet: View {
     let gMeter: GMeter
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
+    @AppStorage(Prefs.placeNames) private var showPlaceNames = true
 
     var body: some View {
         let stats = TripStats(recorder.points)
@@ -478,7 +480,9 @@ struct DriveSheet: View {
         .onChange(of: path) {
             if !path.isEmpty { detent = .large }
         }
-        .task(id: recorder.trips.count) { places.resolve(recorder.trips) }
+        .task(id: "\(recorder.trips.count) \(showPlaceNames)") {
+            places.resolve(recorder.trips, enabled: showPlaceNames)
+        }
     }
 
     @ViewBuilder
@@ -668,7 +672,7 @@ struct DriveSheet: View {
                 Section {
                     ForEach(day.trips) { trip in
                         NavigationLink(value: Route.trip(trip.url)) {
-                            TripRow(trip: trip, title: places.title(for: trip))
+                            TripRow(trip: trip, title: showPlaceNames ? places.title(for: trip) : nil)
                         }
                     }
                     .onDelete { offsets in
@@ -944,6 +948,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
     @AppStorage(Prefs.speedLimits) private var showSpeedLimits = true
     @AppStorage(Prefs.traffic) private var showTraffic = true
+    @AppStorage(Prefs.placeNames) private var showPlaceNames = true
 
     var body: some View {
         Form {
@@ -971,7 +976,12 @@ struct SettingsView: View {
             Section {
                 Toggle("Natężenie ruchu", isOn: $showTraffic)
             } footer: {
-                Text("Ruch, nazwy ulic i nazwy miejsc na liście tras pochodzą z Map Apple.")
+                Text("Ruch i nazwy ulic pochodzą z Map Apple.")
+            }
+            Section {
+                Toggle("Nazwy miejsc na liście tras", isOn: $showPlaceNames)
+            } footer: {
+                Text("Trasy są podpisane miejscowościami, np. „Rylsk → Rawa Mazowiecka”. Nazwy podają Mapy Apple na podstawie początku i końca trasy zaokrąglonych do ok. 1 km. Po usunięciu trasy jej nazwa też znika.")
             }
         }
         .navigationTitle("Ustawienia")
@@ -992,6 +1002,7 @@ struct TripDetailView: View {
     @State private var csvURL: URL?
     @State private var satellite = false
     @State private var confirmDelete = false
+    @AppStorage(Prefs.placeNames) private var showPlaceNames = true
 
     private static func speedColor(_ fraction: Double) -> Color {
         Color(hue: 0.33 * (1 - fraction), saturation: 0.9, brightness: 0.85)
@@ -1066,7 +1077,7 @@ struct TripDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(places.title(for: trip) ?? "Przejazd")
+                    Text((showPlaceNames ? places.title(for: trip) : nil) ?? "Przejazd")
                         .font(.title2.weight(.bold))
                         .lineLimit(2)
                     Text("\(dayTitle(trip.start)) · \(timeRange(trip.start, end))")

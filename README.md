@@ -18,6 +18,8 @@ dopisywany na bieżąco, więc przerwanie działania aplikacji nie kasuje nagran
 ## Połączenia sieciowe
 
 - **Mapy Apple**: kafelki mapy, natężenie ruchu i nazwa ulicy (geokoder Apple, najwyżej raz na 20 s).
+  Nazwy miejsc na liście tras: początek i koniec trasy zaokrąglone do ok. 1 km, raz na trasę;
+  wyłączane w Ustawieniach, kasowane razem z trasą.
 - **OpenStreetMap (Overpass API)**: ograniczenia prędkości. Aplikacja pobiera drogi dla całego kwadratu mapy
   (ok. 2 x 3 km) i trzyma go w pamięci podręcznej 30 dni, więc serwer widzi kolejne kwadraty i adres IP,
   a nie dokładną pozycję. Wyłączane w Ustawieniach ("Znaki ograniczeń prędkości").
