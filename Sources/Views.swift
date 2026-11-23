@@ -157,6 +157,23 @@ struct TripRow: View {
     }
 }
 
+/// The panel's main buttons: a full-width capsule that dims while pressed.
+struct PillButtonStyle: ButtonStyle {
+    let tint: Color
+    var height: CGFloat = 56
+    var font: Font = .title3.bold()
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(font)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .background(tint.opacity(configuration.isPressed ? 0.7 : 1), in: Capsule())
+            .contentShape(Capsule())
+    }
+}
+
 /// An action under a title, as on a place card in Maps: symbol over a short word.
 struct ActionLabel: View {
     let title: String
@@ -419,7 +436,12 @@ struct MapLayer: View {
 /// saved trips, statistics and settings at full height.
 struct DriveSheet: View {
     // ponytail: fixed resting height; measure the content instead if the largest text sizes clip it.
-    static let compactHeight: CGFloat = 190
+    static let compactHeight: CGFloat = 200
+    /// Parked and not recording, the panel shows the place and a large Start; from this speed up
+    /// it shows the speedometer even without recording.
+    static let movingSpeed = 5.0 // km/h
+    /// Darker than system green, so the white label keeps 3:1 contrast.
+    static let startGreen = Color(red: 0.12, green: 0.6, blue: 0.28)
     static let compactDetent = PresentationDetent.height(compactHeight)
 
     @EnvironmentObject var recorder: Recorder
@@ -511,36 +533,16 @@ struct DriveSheet: View {
         return recorder.isRecording ? "Nagrywanie" : "Gotowy do jazdy"
     }
 
-    /// Speedometer on the left, where you are and how far you have driven next to it, controls below.
+    /// Two states. Parked and not recording: where you are, set large, and a large Start.
+    /// Driving (recording, replaying, or simply moving): speedometer, place, distance and time.
     private func hud(_ stats: TripStats) -> some View {
-        let over = speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
+        let kmh = (recorder.live?.speed ?? 0) * 3.6
+        let driving = recorder.isRecording || recorder.isReplaying || kmh >= Self.movingSpeed
         return VStack(spacing: 14) {
-            HStack(alignment: .center, spacing: 16) {
-                VStack(spacing: -2) {
-                    Text(String(format: "%.0f", (recorder.live?.speed ?? 0) * 3.6))
-                        .font(.system(size: 64, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(over ? Color.red : Color.primary) // the sign also grows: not colour alone
-                    Text("km/h").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
-                }
-                .frame(minWidth: 100)
-                .accessibilityElement(children: .combine)
-                VStack(alignment: .leading, spacing: 6) {
-                    // A short name is set large; a long one shrinks to fit instead of being cut off.
-                    Text(statusTitle)
-                        .font(.largeTitle.weight(.bold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.45)
-                    HStack(alignment: .firstTextBaseline, spacing: 18) {
-                        Text(formatKm(stats.distance)).accessibilityLabel("Dystans \(formatKm(stats.distance))")
-                        Text(formatDuration(stats.duration)).accessibilityLabel("Czas \(formatDuration(stats.duration))")
-                    }
-                    .font(.title2.weight(.semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                }
-                Spacer(minLength: 0)
+            if driving {
+                drivingHeader(stats, kmh: kmh)
+            } else {
+                parkedHeader
             }
             if recorder.denied {
                 HStack(spacing: 12) {
@@ -563,27 +565,68 @@ struct DriveSheet: View {
         }
     }
 
-    private func bigButton(_ title: String, tint: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title).font(.headline).frame(maxWidth: .infinity)
+    /// Nothing is being measured yet, so no zeros: the place fills the width.
+    private var parkedHeader: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            // A short name is set large; a long one shrinks to fit instead of being cut off.
+            Text(street ?? "Gotowy do jazdy")
+                .font(.largeTitle.weight(.bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+            Text(street == nil ? "Naciśnij Start, żeby nagrać trasę" : "Gotowy do jazdy")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
-        .buttonStyle(.borderedProminent)
-        .buttonBorderShape(.capsule)
-        .controlSize(.large)
-        .tint(tint)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func drivingHeader(_ stats: TripStats, kmh: Double) -> some View {
+        let over = speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
+        return HStack(alignment: .center, spacing: 16) {
+            VStack(spacing: -2) {
+                Text(String(format: "%.0f", kmh))
+                    .font(.system(size: 64, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(over ? Color.red : Color.primary) // the sign also grows: not colour alone
+                Text("km/h").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
+            }
+            .frame(minWidth: 100)
+            .accessibilityElement(children: .combine)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(statusTitle)
+                    .font(.largeTitle.weight(.bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.45)
+                HStack(alignment: .firstTextBaseline, spacing: 18) {
+                    Text(formatKm(stats.distance)).accessibilityLabel("Dystans \(formatKm(stats.distance))")
+                    Text(formatDuration(stats.duration)).accessibilityLabel("Czas \(formatDuration(stats.duration))")
+                }
+                .font(.title2.weight(.semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     private var recordControls: some View {
         HStack(spacing: 12) {
             if recorder.isRecording {
-                bigButton(recorder.isPaused ? "Wznów" : "Pauza", tint: .orange) {
+                Button(recorder.isPaused ? "Wznów" : "Pauza") {
                     if recorder.isPaused { recorder.resume() } else { recorder.pause() }
                 }
-                bigButton("Stop", tint: .red) {
+                .buttonStyle(PillButtonStyle(tint: .orange))
+                Button("Stop") {
                     if let saved = recorder.stop() { path = [.trip(saved)] }
                 }
+                .buttonStyle(PillButtonStyle(tint: .red))
             } else {
-                bigButton("Start", tint: .green) { recorder.start() }
+                Button("Start") { recorder.start() }
+                    .buttonStyle(PillButtonStyle(tint: Self.startGreen, height: 64, font: .title2.bold()))
             }
         }
     }
