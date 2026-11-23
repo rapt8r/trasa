@@ -7,10 +7,11 @@ struct TrasaApp: App {
     @StateObject private var recorder = Recorder()
     // Held, not observed: only the car screen redraws when car values change.
     @State private var obd = OBDAdapter()
+    @State private var places = TripPlaces()
 
     var body: some Scene {
         WindowGroup {
-            RecordView(obd: obd).environmentObject(recorder)
+            RecordView(obd: obd, places: places).environmentObject(recorder)
         }
     }
 }
@@ -40,6 +41,19 @@ func tripDateTitle(_ date: Date) -> String {
     return date.formatted(.dateTime.day().month(.wide)) + ", " + time
 }
 
+/// "Dziś", "Wczoraj", otherwise "Sobota, 21 listopada".
+func dayTitle(_ date: Date) -> String {
+    if Calendar.current.isDateInToday(date) { return "Dziś" }
+    if Calendar.current.isDateInYesterday(date) { return "Wczoraj" }
+    let text = date.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    return text.prefix(1).uppercased() + text.dropFirst()
+}
+
+/// "18:12–18:25"
+func timeRange(_ start: Date, _ end: Date) -> String {
+    start.formatted(date: .omitted, time: .shortened) + "–" + end.formatted(date: .omitted, time: .shortened)
+}
+
 /// A titled group of numbers or a chart, as in Health and Fitness.
 struct Card<Content: View>: View {
     let title: String
@@ -58,27 +72,107 @@ struct Card<Content: View>: View {
     }
 }
 
-struct Stat: View {
-    let title: String
+/// One number with its name above it, set large: the unit of a workout summary in Fitness.
+struct Metric: View {
+    let label: String
     let value: String
 
     var body: some View {
-        VStack(spacing: 2) {
-            // Four tiles share a row on a narrow phone: shrink a little before truncating.
-            Text(value).font(.headline).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-            Text(title).font(.caption).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// Its own view, so only this number redraws when the accelerometer reading changes.
-struct GStat: View {
+/// The secondary readings in one quiet line. Its own view, so only this line redraws when the
+/// accelerometer reading changes.
+struct LiveDetails: View {
+    let text: String
     @ObservedObject var meter: GMeter
 
     var body: some View {
-        Stat(title: "Siła G", value: String(format: "%.2f g", locale: Locale.current, meter.value))
+        Text(text + String(format: " · %.2f g", locale: Locale.current, meter.value))
+            .font(.footnote)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+    }
+}
+
+/// The shape of a route drawn small: what tells one trip from another at a glance.
+struct RouteGlyph: View {
+    let outline: [OutlinePoint]
+
+    var body: some View {
+        GeometryReader { geo in
+            Path { path in
+                for (i, p) in outline.enumerated() {
+                    let point = CGPoint(x: p.x * geo.size.width, y: p.y * geo.size.height)
+                    if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                }
+            }
+            .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+        }
+        .padding(10)
+        .frame(width: 44, height: 44)
+        .background(Color.blue.gradient, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .accessibilityHidden(true)
+    }
+}
+
+/// A saved trip in a list: where it went, when, how far.
+struct TripRow: View {
+    let trip: Trip
+    let title: String?
+
+    var body: some View {
+        let range = timeRange(trip.start, trip.points.last?.t ?? trip.start)
+        let numbers = "\(formatKm(trip.stats.distance)) · \(formatShortDuration(trip.stats.duration))"
+        HStack(spacing: 12) {
+            // ponytail: the outline is recomputed whenever the row redraws; cache it per trip if lists get long.
+            RouteGlyph(outline: routeOutline(trip.points))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title ?? range)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                Text(title == nil ? numbers : range + " · " + numbers)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// An action under a title, as on a place card in Maps: symbol over a short word.
+struct ActionLabel: View {
+    let title: String
+    let icon: String
+    var prominent = false
+    var tint = Color.blue
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon).font(.body.weight(.semibold))
+            Text(title).font(.caption.weight(.medium))
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 56)
+        .foregroundStyle(prominent ? Color.white : tint)
+        .background(prominent ? tint : Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -145,6 +239,7 @@ struct Puck: View {
 
 struct RecordView: View {
     let obd: OBDAdapter
+    let places: TripPlaces
     @EnvironmentObject var recorder: Recorder
     @StateObject private var road = RoadInfo()
     // Not observed here on purpose: it changes every frame, and only MapLayer needs to redraw then.
@@ -232,6 +327,7 @@ struct RecordView: View {
                 DriveSheet(detent: $detent, path: $path, street: road.street, speedLimit: road.speedLimit, gMeter: motion.gMeter)
                     .environmentObject(recorder)
                     .environmentObject(obd)
+                    .environmentObject(places)
                     .presentationDetents([DriveSheet.compactDetent, .medium, .large], selection: $detent)
                     .presentationBackgroundInteraction(.enabled(upThrough: .medium))
                     .presentationDragIndicator(.visible)
@@ -326,6 +422,7 @@ struct DriveSheet: View {
     static let compactDetent = PresentationDetent.height(compactHeight)
 
     @EnvironmentObject var recorder: Recorder
+    @EnvironmentObject var places: TripPlaces
     @Binding var detent: PresentationDetent
     @Binding var path: [Route]
     let street: String?
@@ -352,7 +449,15 @@ struct DriveSheet: View {
                         savedTrips
                         Section {
                             NavigationLink(value: Route.car) { Label("Samochód", systemImage: "car.side.fill") }
-                            NavigationLink(value: Route.stats) { Label("Statystyki", systemImage: "chart.bar.fill") }
+                            NavigationLink(value: Route.stats) {
+                                HStack {
+                                    Label("Statystyki", systemImage: "chart.bar.fill")
+                                    Spacer()
+                                    if !recorder.trips.isEmpty {
+                                        Text(tripsLabel(recorder.trips.count)).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
                             NavigationLink(value: Route.settings) { Label("Ustawienia", systemImage: "gearshape.fill") }
                         }
                     }
@@ -373,6 +478,7 @@ struct DriveSheet: View {
         .onChange(of: path) {
             if !path.isEmpty { detent = .large }
         }
+        .task(id: recorder.trips.count) { places.resolve(recorder.trips) }
     }
 
     @ViewBuilder
@@ -408,7 +514,7 @@ struct DriveSheet: View {
             HStack(alignment: .center, spacing: 16) {
                 VStack(spacing: -2) {
                     Text(String(format: "%.0f", (recorder.live?.speed ?? 0) * 3.6))
-                        .font(.system(size: 60, weight: .bold, design: .rounded))
+                        .font(.system(size: 64, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(over ? Color.red : Color.primary) // the sign also grows: not colour alone
                     Text("km/h").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
@@ -418,17 +524,17 @@ struct DriveSheet: View {
                 VStack(alignment: .leading, spacing: 6) {
                     // A short name is set large; a long one shrinks to fit instead of being cut off.
                     Text(statusTitle)
-                        .font(.title.weight(.bold))
+                        .font(.largeTitle.weight(.bold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.55)
+                        .minimumScaleFactor(0.45)
                     HStack(alignment: .firstTextBaseline, spacing: 18) {
                         Text(formatKm(stats.distance)).accessibilityLabel("Dystans \(formatKm(stats.distance))")
                         Text(formatDuration(stats.duration)).accessibilityLabel("Czas \(formatDuration(stats.duration))")
                     }
-                    .font(.title3.weight(.medium))
+                    .font(.title2.weight(.semibold))
                     .monospacedDigit()
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .minimumScaleFactor(0.6)
                 }
                 Spacer(minLength: 0)
             }
@@ -513,75 +619,65 @@ struct DriveSheet: View {
         }
     }
 
+    /// The drive in progress: four numbers set large, the rest in one quiet line. Nothing when parked.
     @ViewBuilder
     private func currentTrip(_ stats: TripStats) -> some View {
-        let live = recorder.live
-        let altitudeText: String = live.map { String(format: "%.0f m", $0.alt) } ?? "–"
-        let courseText: String = live?.course.map { compass($0) } ?? "–"
-        let accuracyText: String = live.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
         if recorder.isRecording || recorder.isReplaying {
+            let live = recorder.live
             let fuel = fuelUsed(distance: stats.distance, per100: fuelPer100)
-            Section(recorder.isReplaying ? "Odtwarzany przejazd" : "Ten przejazd") {
-                HStack {
-                    Stat(title: "Maks.", value: formatKmh(stats.maxSpeed))
-                    Stat(title: "Średnia", value: formatKmh(stats.avgSpeed))
-                    Stat(title: "Paliwo", value: formatLitres(fuel))
-                    Stat(title: "Koszt", value: formatCost(fuel * fuelPrice))
+            let altitude = live.map { String(format: "%.0f m", $0.alt) } ?? "–"
+            let heading = live?.course.map { compass($0) } ?? "–"
+            let accuracy = live.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
+            Section {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
+                    GridRow {
+                        Metric(label: "Średnia prędkość", value: formatKmh(stats.avgSpeed))
+                        Metric(label: "Najwyższa prędkość", value: formatKmh(stats.maxSpeed))
+                    }
+                    Divider()
+                    GridRow {
+                        Metric(label: "Paliwo (szac.)", value: formatLitres(fuel))
+                        Metric(label: "Koszt (szac.)", value: formatCost(fuel * fuelPrice))
+                    }
                 }
-                HStack {
-                    Stat(title: "Wysokość", value: altitudeText)
-                    Stat(title: "Kierunek", value: courseText)
-                    Stat(title: "GPS", value: accuracyText)
-                    GStat(meter: gMeter)
-                }
+                .padding(.vertical, 4)
+                LiveDetails(text: "Wysokość \(altitude) · kierunek \(heading) · GPS \(accuracy)", meter: gMeter)
+            } header: {
+                Text(recorder.isReplaying ? "Odtwarzany przejazd" : "Ten przejazd")
             }
-        } else {
-            Section("Teraz") {
-                HStack {
-                    Stat(title: "Wysokość", value: altitudeText)
-                    Stat(title: "Kierunek", value: courseText)
-                    Stat(title: "GPS", value: accuracyText)
-                    GStat(meter: gMeter)
-                }
-            }
+            .headerProminence(.increased)
         }
     }
 
+    /// Saved trips by day, as recent places are listed in Maps: a picture, a name, a line of detail.
+    @ViewBuilder
     private var savedTrips: some View {
-        let distance = recorder.trips.reduce(0.0) { $0 + $1.stats.distance }
-        let duration = recorder.trips.reduce(0.0) { $0 + $1.stats.duration }
-        let cost = fuelUsed(distance: distance, per100: fuelPer100) * fuelPrice
-        return Section("Zapisane trasy") {
-            if recorder.trips.isEmpty {
-                Text("Nagraj pierwszą trasę przyciskiem Start.").foregroundStyle(.secondary)
-            } else {
-                HStack {
-                    Stat(title: "Trasy", value: "\(recorder.trips.count)")
-                    Stat(title: "Łącznie", value: formatKm(distance))
-                    Stat(title: "Czas", value: formatDuration(duration))
-                    Stat(title: "Koszt", value: formatCost(cost))
+        if recorder.trips.isEmpty {
+            Section {
+                VStack(spacing: 6) {
+                    Image(systemName: "road.lanes").font(.title).foregroundStyle(.secondary)
+                    Text("Brak zapisanych tras").font(.headline)
+                    Text("Naciśnij Start, żeby nagrać pierwszą.").font(.subheadline).foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .accessibilityElement(children: .combine)
             }
-            ForEach(recorder.trips) { trip in
-                NavigationLink(value: Route.trip(trip.url)) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "car.fill")
-                            .font(.subheadline)
-                            .foregroundStyle(.white)
-                            .frame(width: 34, height: 34)
-                            .background(Color.blue, in: Circle())
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(tripDateTitle(trip.start)).font(.headline)
-                            Text("\(formatKm(trip.stats.distance)) · \(formatShortDuration(trip.stats.duration)) · śr. \(formatKmh(trip.stats.avgSpeed))")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+        } else {
+            ForEach(groupByDay(recorder.trips)) { day in
+                Section {
+                    ForEach(day.trips) { trip in
+                        NavigationLink(value: Route.trip(trip.url)) {
+                            TripRow(trip: trip, title: places.title(for: trip))
                         }
                     }
+                    .onDelete { offsets in
+                        for trip in offsets.map({ day.trips[$0] }) { recorder.delete(trip) }
+                    }
+                } header: {
+                    Text(dayTitle(day.day))
                 }
-            }
-            .onDelete { offsets in
-                for trip in offsets.map({ recorder.trips[$0] }) { recorder.delete(trip) }
+                .headerProminence(.increased)
             }
         }
     }
@@ -875,7 +971,7 @@ struct SettingsView: View {
             Section {
                 Toggle("Natężenie ruchu", isOn: $showTraffic)
             } footer: {
-                Text("Ruch i nazwy ulic pochodzą z Map Apple.")
+                Text("Ruch, nazwy ulic i nazwy miejsc na liście tras pochodzą z Map Apple.")
             }
         }
         .navigationTitle("Ustawienia")
@@ -883,14 +979,19 @@ struct SettingsView: View {
     }
 }
 
+/// One saved trip, laid out like a place card in Maps with a Fitness-style summary:
+/// the route, what it was and when, what you can do with it, then the numbers.
 struct TripDetailView: View {
     let trip: Trip
     @EnvironmentObject var recorder: Recorder
+    @EnvironmentObject var places: TripPlaces
+    @Environment(\.dismiss) private var dismiss
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
     @State private var gpxURL: URL?
     @State private var csvURL: URL?
     @State private var satellite = false
+    @State private var confirmDelete = false
 
     private static func speedColor(_ fraction: Double) -> Color {
         Color(hue: 0.33 * (1 - fraction), saturation: 0.9, brightness: 0.85)
@@ -915,10 +1016,10 @@ struct TripDetailView: View {
         let chunks = speedChunks(trip.points)
         let fuel = fuelUsed(distance: s.distance, per100: fuelPer100)
         let end = trip.points.last?.t ?? trip.start
-        // Chart gets at most ~300 samples; the map and the files keep every point.
+        // Charts get at most ~300 samples; the map and the files keep every point.
         let samples = stride(from: 0, to: trip.points.count, by: max(1, trip.points.count / 300)).map { trip.points[$0] }
         ScrollView {
-            VStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 Map(initialPosition: routeFrame) {
                     ForEach(chunks) { chunk in
                         MapPolyline(coordinates: trip.points[chunk.range].map(\.coordinate))
@@ -930,7 +1031,7 @@ struct TripDetailView: View {
                     }
                 }
                 .mapStyle(satellite ? .hybrid(elevation: .realistic) : .standard(elevation: .realistic, pointsOfInterest: .excludingAll))
-                .frame(height: 300)
+                .frame(height: 270)
                 .overlay(alignment: .bottomTrailing) {
                     Button {
                         satellite.toggle()
@@ -943,58 +1044,85 @@ struct TripDetailView: View {
                     .accessibilityLabel(satellite ? "Mapa" : "Satelita")
                     .padding(10)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                // Legend: the colour scale with the trip's own numbers at its ends.
-                HStack(spacing: 8) {
-                    Text("0 km/h")
-                    Capsule()
-                        .fill(LinearGradient(colors: [Self.speedColor(0), Self.speedColor(0.5), Self.speedColor(1)],
-                                             startPoint: .leading, endPoint: .trailing))
-                        .frame(height: 6)
-                    Text(formatKmh(s.maxSpeed))
+                .overlay(alignment: .bottomLeading) {
+                    // Legend on the map it explains: the colour scale with this trip's top speed.
+                    HStack(spacing: 6) {
+                        Text("0")
+                        Capsule()
+                            .fill(LinearGradient(colors: [Self.speedColor(0), Self.speedColor(0.5), Self.speedColor(1)],
+                                                 startPoint: .leading, endPoint: .trailing))
+                            .frame(width: 64, height: 5)
+                        Text(formatKmh(s.maxSpeed))
+                    }
+                    .font(.caption2.weight(.medium).monospacedDigit())
+                    .padding(.horizontal, 10)
+                    .frame(height: 26)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.leading, 10)
+                    .padding(.bottom, 34) // above the Maps logo
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Kolor trasy oznacza prędkość: zielony wolno, czerwony do \(formatKmh(s.maxSpeed))")
                 }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Kolor trasy oznacza prędkość: zielony wolno, czerwony do \(formatKmh(s.maxSpeed))")
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                Button {
-                    recorder.startReplay(trip)
-                } label: {
-                    Label("Odtwórz przejazd", systemImage: "play.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 30)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(places.title(for: trip) ?? "Przejazd")
+                        .font(.title2.weight(.bold))
+                        .lineLimit(2)
+                    Text("\(dayTitle(trip.start)) · \(timeRange(trip.start, end))")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.capsule)
-                .controlSize(.large)
-                .disabled(recorder.isRecording)
+                .accessibilityElement(children: .combine)
 
-                Card(title: "Przejazd") {
-                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
+                HStack(spacing: 10) {
+                    Button {
+                        recorder.startReplay(trip)
+                    } label: {
+                        ActionLabel(title: "Odtwórz", icon: "play.fill", prominent: true)
+                    }
+                    .disabled(recorder.isRecording)
+                    .opacity(recorder.isRecording ? 0.4 : 1)
+                    Menu {
+                        if let gpxURL { ShareLink("Plik GPX", item: gpxURL) }
+                        if let csvURL { ShareLink("Plik CSV", item: csvURL) }
+                    } label: {
+                        ActionLabel(title: "Eksportuj", icon: "square.and.arrow.up")
+                    }
+                    .disabled(gpxURL == nil && csvURL == nil)
+                    Button {
+                        confirmDelete = true
+                    } label: {
+                        ActionLabel(title: "Usuń", icon: "trash", tint: .red)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                Card(title: "Podsumowanie") {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
                         GridRow {
-                            Stat(title: "Dystans", value: formatKm(s.distance))
-                            Stat(title: "Czas", value: formatDuration(s.duration))
-                            Stat(title: "W ruchu", value: formatDuration(s.movingTime))
+                            Metric(label: "Dystans", value: formatKm(s.distance))
+                            Metric(label: "Czas", value: formatDuration(s.duration))
                         }
+                        Divider()
                         GridRow {
-                            Stat(title: "Start", value: trip.start.formatted(date: .omitted, time: .shortened))
-                            Stat(title: "Koniec", value: end.formatted(date: .omitted, time: .shortened))
-                            Stat(title: "Postój", value: formatDuration(s.duration - s.movingTime))
+                            Metric(label: "Średnia prędkość", value: formatKmh(s.avgSpeed))
+                            Metric(label: "Najwyższa prędkość", value: formatKmh(s.maxSpeed))
+                        }
+                        Divider()
+                        GridRow {
+                            Metric(label: "W ruchu", value: formatDuration(s.movingTime))
+                            Metric(label: "Postój", value: formatDuration(s.duration - s.movingTime))
+                        }
+                        Divider()
+                        GridRow {
+                            Metric(label: "Paliwo (szac.)", value: formatLitres(fuel))
+                            Metric(label: "Koszt (szac.)", value: formatCost(fuel * fuelPrice))
                         }
                     }
                 }
 
                 Card(title: "Prędkość") {
-                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
-                        GridRow {
-                            Stat(title: "Średnia", value: formatKmh(s.avgSpeed))
-                            Stat(title: "W ruchu", value: formatKmh(s.avgMovingSpeed))
-                            Stat(title: "Maks.", value: formatKmh(s.maxSpeed))
-                        }
-                    }
                     Chart(samples, id: \.t) { p in
                         AreaMark(x: .value("Czas", p.t), y: .value("km/h", (p.speed ?? 0) * 3.6))
                             .interpolationMethod(.monotone)
@@ -1005,28 +1133,11 @@ struct TripDetailView: View {
                             .foregroundStyle(Color.blue)
                     }
                     .chartYAxisLabel("km/h")
-                    .frame(height: 150)
+                    .frame(height: 160)
                     .accessibilityLabel("Wykres prędkości w czasie przejazdu")
                 }
 
-                Card(title: "Paliwo (szacunek)") {
-                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
-                        GridRow {
-                            Stat(title: "Paliwo", value: formatLitres(fuel))
-                            Stat(title: "Koszt", value: formatCost(fuel * fuelPrice))
-                            Stat(title: "Na 100 km", value: formatCost(fuelPer100 * fuelPrice))
-                        }
-                    }
-                }
-
                 Card(title: "Wysokość") {
-                    Grid(horizontalSpacing: 8, verticalSpacing: 14) {
-                        GridRow {
-                            Stat(title: "Min.", value: String(format: "%.0f m", s.minAlt))
-                            Stat(title: "Maks.", value: String(format: "%.0f m", s.maxAlt))
-                            Stat(title: "Punkty GPS", value: "\(trip.points.count)")
-                        }
-                    }
                     Chart(samples, id: \.t) { p in
                         AreaMark(x: .value("Czas", p.t), yStart: .value("m", s.minAlt), yEnd: .value("m", p.alt))
                             .interpolationMethod(.monotone)
@@ -1037,27 +1148,32 @@ struct TripDetailView: View {
                             .foregroundStyle(Color.green)
                     }
                     .chartYScale(domain: .automatic(includesZero: false))
-                    .chartYAxisLabel("m")
+                    .chartYAxisLabel("m n.p.m.")
                     .frame(height: 120)
                     .accessibilityLabel("Wykres wysokości w czasie przejazdu")
+                    Text(String(format: "Od %.0f m do %.0f m", s.minAlt, s.maxAlt))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
+
+                Text("Zapisano punktów GPS: \(trip.points.count)")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity)
             }
             .padding(.horizontal)
             .padding(.bottom)
         }
         .navigationTitle(tripDateTitle(trip.start))
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if let gpxURL { ShareLink("Eksportuj GPX", item: gpxURL) }
-                    if let csvURL { ShareLink("Eksportuj CSV", item: csvURL) }
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .accessibilityLabel("Eksportuj trasę")
-                .disabled(gpxURL == nil && csvURL == nil)
+        .confirmationDialog("Usunąć tę trasę?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Usuń trasę", role: .destructive) {
+                recorder.delete(trip)
+                dismiss()
             }
+            Button("Anuluj", role: .cancel) {}
+        } message: {
+            Text("Nagranie zostanie usunięte z telefonu. Tego nie da się cofnąć.")
         }
         .task {
             let base = FileManager.default.temporaryDirectory

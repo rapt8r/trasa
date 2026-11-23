@@ -577,3 +577,54 @@ func solarElevation(lat: Double, lon: Double, date: Date) -> Double {
 func isNight(lat: Double, lon: Double, date: Date) -> Bool {
     solarElevation(lat: lat, lon: lon, date: date) < nightSunElevation
 }
+
+// MARK: Trip list: names, days, route shapes
+
+/// "Rylsk → Rawa Mazowiecka", or just "Rylsk" for a drive that ends where it began.
+func tripTitle(from: String?, to: String?) -> String? {
+    switch (from, to) {
+    case let (a?, b?): return a == b ? a : "\(a) → \(b)"
+    case let (a?, nil): return a
+    case let (nil, b?): return b
+    default: return nil
+    }
+}
+
+struct TripDay: Identifiable {
+    let day: Date
+    let trips: [Trip]
+    var id: Date { day }
+}
+
+/// Trips grouped by the calendar day they started on, newest day first; order within a day is kept.
+func groupByDay(_ trips: [Trip], calendar: Calendar = .current) -> [TripDay] {
+    var order: [Date] = []
+    var buckets: [Date: [Trip]] = [:]
+    for trip in trips {
+        let day = calendar.startOfDay(for: trip.start)
+        if buckets[day] == nil { order.append(day) }
+        buckets[day, default: []].append(trip)
+    }
+    return order.sorted(by: >).map { TripDay(day: $0, trips: buckets[$0] ?? []) }
+}
+
+struct OutlinePoint: Equatable {
+    let x: Double
+    let y: Double
+}
+
+/// The route's shape scaled into a unit square (north up, proportions kept), for a small picture of it.
+func routeOutline(_ p: [TrackPoint], maxPoints: Int = 48) -> [OutlinePoint] {
+    guard let last = p.last else { return [] }
+    let limit = max(1, maxPoints)
+    let step = max(1, (p.count + limit - 1) / limit) // rounded up, so at most `limit` points plus the last
+    var picked = stride(from: 0, to: p.count, by: step).map { p[$0] }
+    if (p.count - 1) % step != 0 { picked.append(last) }
+    let shrink = cos(last.lat * Double.pi / 180) // a degree of longitude is shorter than one of latitude
+    let xs = picked.map { $0.lon * shrink }, ys = picked.map(\.lat)
+    guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return [] }
+    let span = max(maxX - minX, maxY - minY)
+    guard span > 0 else { return [OutlinePoint(x: 0.5, y: 0.5)] }
+    let midX = (minX + maxX) / 2, midY = (minY + maxY) / 2
+    return zip(xs, ys).map { OutlinePoint(x: 0.5 + ($0 - midX) / span, y: 0.5 - ($1 - midY) / span) }
+}

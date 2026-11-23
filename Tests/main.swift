@@ -271,6 +271,20 @@ let plain = lifted.spec(for: fix(8, 20, 90)), raised = lifted.spec(for: fix(8, 2
 precondition(plain.lon > raised.lon && raised.lon > 21 && plain.distance == raised.distance, "lift shortens the look-ahead only")
 precondition(lifted.spec(for: fix(8, 20, 90), lift: 5).lon == raised.lon, "lift is clamped")
 
+// Trip list
+precondition(tripTitle(from: "Rylsk", to: "Rawa") == "Rylsk → Rawa" && tripTitle(from: "Rylsk", to: "Rylsk") == "Rylsk")
+precondition(tripTitle(from: "Rylsk", to: nil) == "Rylsk" && tripTitle(from: nil, to: "Rawa") == "Rawa" && tripTitle(from: nil, to: nil) == nil)
+let days = groupByDay(history + [tripOn(11, 2)], calendar: cal)
+precondition(days.count == 4 && days[0].trips.count == 1 && days[3].trips.count == 2, "days: \(days.map(\.trips.count))")
+precondition(days[0].day > days[1].day && days[3].day == cal.startOfDay(for: history[0].start) && groupByDay([], calendar: cal).isEmpty)
+let northward = routeOutline(moving)
+precondition(northward.count == 3 && northward.allSatisfy { abs($0.x - 0.5) < 1e-9 }, "a north-south road is a vertical line")
+precondition(abs(northward[0].y - 1) < 1e-9 && abs(northward[2].y) < 1e-9, "north is up")
+precondition(routeOutline([]).isEmpty && routeOutline([moving[0]]) == [OutlinePoint(x: 0.5, y: 0.5)])
+let sampled = routeOutline(many)
+precondition(sampled.count <= 50 && sampled.allSatisfy { $0.x >= -1e-9 && $0.x <= 1 + 1e-9 && $0.y >= -1e-9 && $0.y <= 1 + 1e-9 })
+precondition(abs(sampled.last!.y) < 1e-9, "the end of the route is always drawn")
+
 // OBD: adapter replies
 precondition(elmLines("SEARCHING...\r41 00\r\r\n") == ["41 00"])
 let hello = parseELM("SEARCHING...\r7E8 06 41 00 BE 3F A8 13 \r7E9 06 41 00 80 00 00 01 \r\r")
