@@ -238,6 +238,21 @@ struct SpeedLimitSign: View {
     }
 }
 
+/// The engine is still cold: a snowflake under the speed limit sign, until the coolant warms up.
+struct ColdEngineSign: View {
+    let coolant: Int
+
+    var body: some View {
+        Image(systemName: "snowflake")
+            .font(.system(size: 30, weight: .semibold))
+            .foregroundStyle(.blue)
+            .frame(width: 66, height: 66) // the size of the limit sign above it
+            .background(.regularMaterial, in: Circle())
+            .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+            .accessibilityLabel("Silnik zimny, \(coolant) stopni")
+    }
+}
+
 /// Position marker in the style of Maps navigation: a blue arrow on a white disc.
 struct Puck: View {
     var body: some View {
@@ -335,7 +350,6 @@ struct RecordView: View {
             }
         }
         if recorder.isPaused { return Notice(icon: "pause.fill", text: "Nagrywanie wstrzymane") }
-        if let coldEngine { return Notice(icon: "thermometer.low", text: "Silnik zimny · \(coldEngine) °C") }
         return nil
     }
 
@@ -373,9 +387,17 @@ struct RecordView: View {
                 refreshCar()
             }
             .overlay(alignment: .topLeading) {
-                if let limit = road.speedLimit {
-                    SpeedLimitSign(limit: limit, exceeded: over).padding(12)
+                // Signs in a column, as on a signpost. The gap leaves room for the limit sign growing when exceeded.
+                VStack(spacing: 18) {
+                    if let limit = road.speedLimit {
+                        SpeedLimitSign(limit: limit, exceeded: over)
+                    }
+                    if let coldEngine {
+                        ColdEngineSign(coolant: coldEngine).transition(.scale.combined(with: .opacity))
+                    }
                 }
+                .padding(12)
+                .animation(.spring(duration: 0.45), value: coldEngine != nil)
             }
             .overlay(alignment: .topTrailing) {
                 CarGauges().environmentObject(obd).padding(12)
