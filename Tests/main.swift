@@ -400,7 +400,7 @@ precondition(abs(tf.litres - 0.667) < 1e-9 && tf.source == "auto", "\(tf.litres)
 tf = tripFuel(distance: 10_000, carLitres: 0.3, carDistance: 5_000, per100: 7, correction: 1)
 precondition(abs(tf.litres - 0.65) < 1e-9 && tf.source == "auto + szac.")
 precondition(tripFuel(distance: 0, carLitres: 0.2, carDistance: 0, per100: 7, correction: 0).litres == 0.2, "correction 0 is ignored")
-precondition(formatPer100(6.84, locale: polish) == "6,8 l/100 km")
+precondition(formatPer100(6.84, locale: polish) == "6,8 l/100 km" && fuelFactor(0) == 1 && fuelFactor(-2) == 1 && fuelFactor(1.08) == 1.08)
 
 // Charts and export
 let rpmSeries = carSeries(driven, maxPoints: 10) { $0[0x0C] }

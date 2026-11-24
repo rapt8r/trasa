@@ -241,6 +241,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard peripheral === self.peripheral, !userDisconnected else { return }
+        // Still waiting to connect: this is the late echo of an earlier cancel, the pending request stands.
+        if case .waiting = state { return }
         fail("Połączenie z adapterem zostało przerwane.")
     }
 

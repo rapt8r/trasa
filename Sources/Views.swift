@@ -771,7 +771,7 @@ struct DriveSheet: View {
                     if car.time > 0 {
                         Divider()
                         GridRow {
-                            Metric(label: "Średnie spalanie", value: car.per100.map { formatPer100($0 * fuelCorrection) } ?? "–")
+                            Metric(label: "Średnie spalanie", value: car.per100.map { formatPer100($0 * fuelFactor(fuelCorrection)) } ?? "–")
                             Metric(label: "Na biegu jałowym", value: formatDuration(car.idleTime))
                         }
                     }
@@ -912,7 +912,7 @@ struct StatsView: View {
         var text = "\(tripsLabel(period.count)) · \(formatShortDuration(period.duration)) · \(formatCost(fuel.litres * fuelPrice))"
         // Real consumption, once the car has measured enough of the period to say.
         if period.carDistance >= 1000 {
-            text += " · " + formatPer100(period.carLitres * fuelCorrection / period.carDistance * 100_000)
+            text += " · " + formatPer100(period.carLitres * fuelFactor(fuelCorrection) / period.carDistance * 100_000)
         }
         return text
     }
@@ -1183,8 +1183,8 @@ struct TripDetailView: View {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
                 if car.time > 0 {
                     GridRow {
-                        Metric(label: "Średnie spalanie", value: car.per100.map { formatPer100($0 * fuelCorrection) } ?? "–")
-                        Metric(label: "Paliwo na postoju", value: formatLitres(car.idleLitres * fuelCorrection))
+                        Metric(label: "Średnie spalanie", value: car.per100.map { formatPer100($0 * fuelFactor(fuelCorrection)) } ?? "–")
+                        Metric(label: "Paliwo na postoju", value: formatLitres(car.idleLitres * fuelFactor(fuelCorrection)))
                     }
                     Divider()
                 }
@@ -1211,7 +1211,7 @@ struct TripDetailView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        carChart("Spalanie chwilowe", unit: "l/h", fuelSeries.map { CarPoint(t: $0.t, value: $0.value * fuelCorrection) }, .orange)
+        carChart("Spalanie chwilowe", unit: "l/h", fuelSeries.map { CarPoint(t: $0.t, value: $0.value * fuelFactor(fuelCorrection)) }, .orange)
         carChart("Obroty", unit: "obr./min", rpmSeries, .purple)
         carChart("Temperatura silnika", unit: "°C", coolantSeries, .red)
     }

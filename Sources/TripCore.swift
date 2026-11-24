@@ -479,18 +479,21 @@ struct TripFuel {
     let source: String
 }
 
+/// The Settings correction as a multiplier; nonsense (zero, negative) counts as none.
+func fuelFactor(_ correction: Double) -> Double { correction > 0 ? correction : 1 }
+
 /// Fuel for `distance` metres, of which the car measured `carLitres` over `carDistance`; the rest is
 /// the Settings estimate. Every screen uses this one function, so they cannot disagree.
 func tripFuel(distance: Double, carLitres: Double, carDistance: Double, per100: Double, correction: Double) -> TripFuel {
     let unmeasured = max(0, distance - carDistance)
-    let litres = carLitres * (correction > 0 ? correction : 1) + fuelUsed(distance: unmeasured, per100: per100)
+    let litres = carLitres * fuelFactor(correction) + fuelUsed(distance: unmeasured, per100: per100)
     if carLitres <= 0 && carDistance <= 0 { return TripFuel(litres: litres, source: "szac.") }
     return TripFuel(litres: litres, source: unmeasured <= distance * 0.05 ? "auto" : "auto + szac.")
 }
 
 /// The fuel figure for the gauge: l/100 km when moving, l/h when standing or crawling.
 func liveConsumption(_ car: [Int: Double], correction: Double) -> (value: Double, per100: Bool)? {
-    guard let rate = fuelRate(car).map({ $0 * (correction > 0 ? correction : 1) }) else { return nil }
+    guard let rate = fuelRate(car).map({ $0 * fuelFactor(correction) }) else { return nil }
     if let kmh = car[0x0D], kmh >= liveConsumptionMinSpeed { return (min(99.9, rate / kmh * 100), true) }
     return (rate, false)
 }
