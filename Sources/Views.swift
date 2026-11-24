@@ -570,6 +570,9 @@ struct DriveSheet: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 24)
                         .padding(.bottom, 4)
+                        // Full height always: otherwise the list below takes half of the resting sheet
+                        // and the texts shrink to their minimum scale (they may still shrink to fit the width).
+                        .fixedSize(horizontal: false, vertical: true)
                     List {
                         currentTrip(stats)
                         savedTrips
