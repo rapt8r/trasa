@@ -11,6 +11,9 @@ struct TrackPoint: Codable {
     var course: Double?  // degrees; nil when invalid
     var hAcc: Double     // horizontal accuracy, metres
     var seg: Int? = nil  // bumped on every resume after a pause; nil = first segment
+    /// What the car reported since the previous fix, by OBD parameter number (12 = 0x0C = engine speed).
+    /// Raw values, so fuel and the rest can be recomputed later; nil without an adapter.
+    var car: [Int: Double]? = nil
 }
 
 /// Below this speed a segment counts as standing still: GPS jitter at a red light
@@ -56,6 +59,7 @@ struct Trip: Identifiable {
     let url: URL
     let points: [TrackPoint]
     let stats: TripStats
+    let car: CarStats
     var id: URL { url }
     var start: Date { points.first?.t ?? .distantPast }
 
@@ -63,6 +67,7 @@ struct Trip: Identifiable {
         self.url = url
         self.points = points
         self.stats = TripStats(points)
+        self.car = CarStats(points)
     }
 }
 
@@ -108,14 +113,26 @@ func speedChunks(_ p: [TrackPoint], maxChunks: Int = 60) -> [SpeedChunk] {
     return chunks
 }
 
+/// One row per fix. Parameters the car reported during the trip follow as extra columns at the end.
 func csv(_ points: [TrackPoint]) -> String {
     let iso = ISO8601DateFormatter()
-    var s = "time,lat,lon,alt_m,speed_kmh,course_deg,accuracy_m\n"
+    let pids = Set(points.flatMap { $0.car.map { Array($0.keys) } ?? [] }).sorted()
+    let known = pids.map { UInt8(exactly: $0).flatMap { obdParameters[$0] } }
+    var s = "time,lat,lon,alt_m,speed_kmh,course_deg,accuracy_m"
+    for (pid, parameter) in zip(pids, known) {
+        let name = parameter.map { $0.unit.isEmpty ? $0.name : "\($0.name) [\($0.unit)]" } ?? "obd_\(pid)"
+        s += "," + name.replacingOccurrences(of: ",", with: "")
+    }
+    s += "\n"
     for p in points {
         let v = p.speed.map { String(format: "%.1f", $0 * 3.6) } ?? ""
         let c = p.course.map { String(format: "%.0f", $0) } ?? ""
         let alt = String(format: "%.1f", p.alt), acc = String(format: "%.0f", p.hAcc)
-        s += "\(iso.string(from: p.t)),\(p.lat),\(p.lon),\(alt),\(v),\(c),\(acc)\n"
+        s += "\(iso.string(from: p.t)),\(p.lat),\(p.lon),\(alt),\(v),\(c),\(acc)"
+        for (pid, parameter) in zip(pids, known) {
+            s += "," + (p.car?[pid].map { String(format: "%.\(parameter?.digits ?? 2)f", $0) } ?? "")
+        }
+        s += "\n"
     }
     return s
 }
@@ -384,6 +401,111 @@ struct MotionSmoother {
 func fuelUsed(distance: Double, per100: Double) -> Double { max(0, distance) / 100_000 * max(0, per100) }
 func formatLitres(_ litres: Double, locale: Locale = .current) -> String { String(format: "%.1f l", locale: locale, litres) }
 func formatCost(_ zloty: Double, locale: Locale = .current) -> String { String(format: "%.2f zł", locale: locale, max(0, zloty)) }
+func formatPer100(_ litres: Double, locale: Locale = .current) -> String { String(format: "%.1f l/100 km", locale: locale, litres) }
+
+// MARK: What the car reported during a trip
+
+// All of these need tuning against the real car.
+let carDataMaxGap = 5.0       // s; a reading is taken to hold this long, after that the stretch counts as not measured
+let engineRunningRPM = 300.0  // below this the engine is not running (ignition only, or the starter turning)
+let engineColdBelow = 60.0    // °C of coolant; under this the screen says the engine is cold
+let engineWarmAt = 80.0       // °C of coolant; reaching this ends the warm-up
+let liveConsumptionMinSpeed = 10.0 // km/h; slower than this l/100 km means nothing, the gauge shows l/h
+
+struct CarStats {
+    var samples = 0        // fixes that carry car data
+    var litres = 0.0       // fuel burnt while the car reported its fuel flow, before the Settings correction
+    var distance = 0.0     // m driven during that time
+    var time = 0.0         // s of that time
+    var idleTime = 0.0     // s standing with the engine running
+    var idleLitres = 0.0
+    var maxRPM = 0.0
+    var maxCoolant: Double?
+    /// Seconds from the first reading until the coolant reached `engineWarmAt`;
+    /// nil when the engine was already warm or never got there.
+    var warmUp: Double?
+    private var rpmSeconds = 0.0
+    private var rpmTime = 0.0
+    var avgRPM: Double { rpmTime > 0 ? rpmSeconds / rpmTime : 0 }
+    /// l/100 km over the measured stretch; nil when it is too short to mean anything.
+    var per100: Double? { distance >= 500 ? litres / distance * 100_000 : nil }
+
+    init(_ p: [TrackPoint]) {
+        var rate: (value: Double, t: Date)?
+        var rpm: (value: Double, t: Date)?
+        var firstCoolant: (value: Double, t: Date)?
+        for (i, b) in p.enumerated() {
+            if let car = b.car {
+                samples += 1
+                if let r = fuelRate(car) { rate = (r, b.t) }
+                if let r = car[0x0C] {
+                    rpm = (r, b.t)
+                    maxRPM = max(maxRPM, r)
+                }
+                if let c = car[0x05] {
+                    maxCoolant = max(maxCoolant ?? c, c)
+                    let first = firstCoolant ?? (c, b.t)
+                    firstCoolant = first
+                    if warmUp == nil, first.value < engineWarmAt, c >= engineWarmAt { warmUp = b.t.timeIntervalSince(first.t) }
+                }
+            }
+            guard i > 0 else { continue }
+            let a = p[i - 1], dt = b.t.timeIntervalSince(a.t)
+            // Same rules as TripStats for pauses; a long hole in the fixes (tunnel) is not measured either.
+            guard dt > 0, dt <= carDataMaxGap, a.seg == b.seg else { continue }
+            let running = rpm.map { b.t.timeIntervalSince($0.t) <= carDataMaxGap && $0.value >= engineRunningRPM }
+            if running == true, let rpm {
+                rpmSeconds += rpm.value * dt
+                rpmTime += dt
+            }
+            guard let rate, b.t.timeIntervalSince(rate.t) <= carDataMaxGap else { continue }
+            let burnt = rate.value * dt / 3600
+            litres += burnt
+            time += dt
+            let d = haversine(a, b)
+            if (b.speed ?? d / dt) > movingSpeedThreshold {
+                distance += d
+            } else if running ?? (rate.value > 0) {
+                idleTime += dt
+                idleLitres += burnt
+            }
+        }
+    }
+}
+
+struct TripFuel {
+    let litres: Double
+    /// "auto": measured by the car; "szac.": the Settings estimate; "auto + szac.": some of each.
+    let source: String
+}
+
+/// Fuel for `distance` metres, of which the car measured `carLitres` over `carDistance`; the rest is
+/// the Settings estimate. Every screen uses this one function, so they cannot disagree.
+func tripFuel(distance: Double, carLitres: Double, carDistance: Double, per100: Double, correction: Double) -> TripFuel {
+    let unmeasured = max(0, distance - carDistance)
+    let litres = carLitres * (correction > 0 ? correction : 1) + fuelUsed(distance: unmeasured, per100: per100)
+    if carLitres <= 0 && carDistance <= 0 { return TripFuel(litres: litres, source: "szac.") }
+    return TripFuel(litres: litres, source: unmeasured <= distance * 0.05 ? "auto" : "auto + szac.")
+}
+
+/// The fuel figure for the gauge: l/100 km when moving, l/h when standing or crawling.
+func liveConsumption(_ car: [Int: Double], correction: Double) -> (value: Double, per100: Bool)? {
+    guard let rate = fuelRate(car).map({ $0 * (correction > 0 ? correction : 1) }) else { return nil }
+    if let kmh = car[0x0D], kmh >= liveConsumptionMinSpeed { return (min(99.9, rate / kmh * 100), true) }
+    return (rate, false)
+}
+
+struct CarPoint: Identifiable {
+    let t: Date
+    let value: Double
+    var id: Date { t }
+}
+
+/// One figure from the car over the trip, thinned to about `maxPoints` for a chart.
+func carSeries(_ p: [TrackPoint], maxPoints: Int = 300, _ value: ([Int: Double]) -> Double?) -> [CarPoint] {
+    let all = p.compactMap { point in point.car.flatMap(value).map { CarPoint(t: point.t, value: $0) } }
+    return stride(from: 0, to: all.count, by: max(1, all.count / max(1, maxPoints))).map { all[$0] }
+}
 
 // MARK: Statistics per week / month
 
@@ -392,6 +514,8 @@ struct PeriodSummary: Identifiable {
     var count = 0
     var distance = 0.0
     var duration = 0.0
+    var carLitres = 0.0    // as in CarStats: measured by the car...
+    var carDistance = 0.0  // ...over this many metres
     var id: Date { start }
 }
 
@@ -404,6 +528,8 @@ func summarize(_ trips: [Trip], by unit: Calendar.Component, calendar: Calendar 
         s.count += 1
         s.distance += trip.stats.distance
         s.duration += trip.stats.duration
+        s.carLitres += trip.car.litres
+        s.carDistance += trip.car.distance
         periods[start] = s
     }
     return periods.values.sorted { $0.start > $1.start }

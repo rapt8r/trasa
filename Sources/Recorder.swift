@@ -24,6 +24,8 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var trips: [Trip] = []
     @Published var denied = false
     @Published var error: String?
+    /// Asked for every recorded fix: what the car reported since the previous one (nil without an adapter).
+    var carValues: (() -> [Int: Double]?)?
 
     private let manager = CLLocationManager()
     private let encoder = JSONEncoder()
@@ -180,7 +182,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         for loc in locations where loc.horizontalAccuracy >= 0 && loc.horizontalAccuracy <= Self.maxHorizontalAccuracy {
-            let p = TrackPoint(t: loc.timestamp,
+            var p = TrackPoint(t: loc.timestamp,
                                lat: loc.coordinate.latitude,
                                lon: loc.coordinate.longitude,
                                alt: loc.altitude,
@@ -192,6 +194,7 @@ final class Recorder: NSObject, ObservableObject, CLLocationManagerDelegate {
             if !isReplaying, loc.timestamp.timeIntervalSinceNow > -Self.maxLiveAge { live = p }
             // Recording: same rules as before - skip anything from before Start / Resume.
             guard isRecording, !isPaused, let file, loc.timestamp >= startedAt else { continue }
+            p.car = carValues?()
             // Appended to disk right away: if iOS kills the app mid-drive, the trip so far is kept.
             do {
                 var line = try encoder.encode(p)

@@ -325,6 +325,94 @@ precondition(decodeDTCs([0x43, 0x04, 0x01, 0x43, 0x01, 0x71, 0x03, 0x00, 0x04, 0
 precondition(decodeDTCs([0x43, 0x00]).isEmpty && decodeDTCs([0x43, 0x01, 0xC1, 0x00, 0x00, 0x00]) == ["U0100"])
 precondition(decodeDTCs([0x43, 0x01, 0x51, 0x23]) == ["C1123"] && decodeDTCs([0x41, 0x00]).isEmpty && decodeDTCs([]).isEmpty)
 
+// OBD: which parameters are read each round
+precondition(pollRound([0x04, 0x05, 0x0C, 0x0D, 0x10, 0x11], round: 0) == [0x0C, 0x0D, 0x10, 0x04])
+precondition(pollRound([0x04, 0x05, 0x0C, 0x0D, 0x10, 0x11], round: 1) == [0x0C, 0x0D, 0x10, 0x05])
+precondition(pollRound([0x04, 0x05, 0x0C, 0x0D, 0x10, 0x11], round: 3) == [0x0C, 0x0D, 0x10, 0x04], "the slow ones take turns")
+precondition(pollRound([0x0C, 0x5E], round: 7) == [0x0C, 0x5E] && pollRound([0x05], round: 2) == [0x05] && pollRound([], round: 0).isEmpty)
+
+// OBD: values handed to the trip file once each, and never stale ones
+let t0 = Date(timeIntervalSince1970: 1000)
+var carValues = CarValues()
+precondition(carValues.take(at: t0) == nil)
+carValues.set(0x0C, 2000, at: t0.addingTimeInterval(1))
+carValues.set(0x05, 80, at: t0.addingTimeInterval(1))
+precondition(carValues.take(at: t0.addingTimeInterval(1.5))! == [0x0C: 2000, 0x05: 80])
+precondition(carValues.take(at: t0.addingTimeInterval(2)) == nil, "the same reading is not saved twice")
+carValues.set(0x0C, 2100, at: t0.addingTimeInterval(2.5))
+precondition(carValues.take(at: t0.addingTimeInterval(3))! == [0x0C: 2100] && carValues.values[0x05] == 80)
+carValues.set(0x0C, 900, at: t0.addingTimeInterval(4))
+precondition(carValues.take(at: t0.addingTimeInterval(60)) == nil, "a reading from a minute ago is not this fix's")
+carValues.clear()
+precondition(carValues.values.isEmpty)
+
+// Fuel flow: 1 g/s of air is about a third of a litre per hour; the car's own figure wins
+precondition(abs(fuelRate([0x10: 3])! - 0.986) < 0.005, "idle: \(fuelRate([0x10: 3])!)")
+precondition(fuelRate([0x10: 3, 0x5E: 1.5]) == 1.5 && fuelRate([0x0C: 800]) == nil)
+let cruising = liveConsumption([0x10: 12, 0x0D: 60], correction: 1)!
+precondition(cruising.per100 && abs(cruising.value - 6.57) < 0.02, "\(cruising.value)")
+let standing = liveConsumption([0x10: 3, 0x0D: 0], correction: 2)!
+precondition(!standing.per100 && abs(standing.value - 1.972) < 0.01 && liveConsumption([0x0D: 50], correction: 1) == nil)
+
+// Car data saved with the trip: 20 m/s north, 3.6 l/h, so 2 l/h per second is 0.001 l
+func carPt(_ sec: Double, _ car: [Int: Double]?, speed: Double = 20, seg: Int? = nil) -> TrackPoint {
+    var p = pt(sec, 52.0 + sec * 20 / 111_190, 21.0, speed: speed)
+    p.car = car
+    p.seg = seg
+    return p
+}
+let driven = (0...100).map { carPt(Double($0), [0x5E: 3.6, 0x0C: 2000, 0x05: 60 + Double($0) / 2]) }
+var carStats = CarStats(driven)
+precondition(carStats.samples == 101 && abs(carStats.litres - 0.1) < 1e-9 && carStats.time == 100, "\(carStats.litres)")
+precondition(abs(carStats.distance - 2000) < 5 && abs(carStats.per100! - 5) < 0.02, "\(carStats.distance)")
+precondition(carStats.maxRPM == 2000 && carStats.avgRPM == 2000 && carStats.maxCoolant == 110 && carStats.warmUp == 40)
+precondition(carStats.idleTime == 0)
+let drivenBack = parseJSONL(try! enc.encode(driven[3]) + Data("\n".utf8))
+precondition(drivenBack.count == 1 && drivenBack[0].car! == [0x5E: 3.6, 0x0C: 2000, 0x05: 61.5], "car values survive the file")
+precondition(old[0].car == nil && back[0].car == nil, "files from before the adapter still load")
+// Slow parameters come with only some fixes; the fuel flow holds for a few seconds, then the stretch is not measured
+let sparse = (0...20).map { carPt(Double($0), $0 % 2 == 0 && $0 <= 10 ? [0x5E: 3.6] : nil) }
+carStats = CarStats(sparse)
+precondition(carStats.time == 15 && abs(carStats.litres - 0.015) < 1e-9, "held for carDataMaxGap after the last reading: \(carStats.time)")
+// A pause and a hole in the fixes add no fuel
+let resumedCar = [carPt(0, [0x5E: 3.6]), carPt(1, [0x5E: 3.6]), carPt(500, [0x5E: 3.6], seg: 1), carPt(501, [0x5E: 3.6], seg: 1), carPt(530, [0x5E: 3.6], seg: 1)]
+carStats = CarStats(resumedCar)
+precondition(carStats.time == 2 && abs(carStats.litres - 0.002) < 1e-9, "pause: \(carStats.time)")
+// Standing with the engine running is idling; with the engine off it is not
+func parkedPt(_ sec: Double, _ car: [Int: Double]) -> TrackPoint {
+    var p = pt(sec, 52.0, 21.0, speed: 0)
+    p.car = car
+    return p
+}
+let idling = (0...10).map { parkedPt(Double($0), [0x10: 3, 0x0C: 750]) }
+carStats = CarStats(idling)
+precondition(carStats.idleTime == 10 && carStats.distance == 0 && carStats.per100 == nil && abs(carStats.idleLitres - carStats.litres) < 1e-12)
+precondition(abs(carStats.litres - 0.986 / 360) < 1e-4 && carStats.avgRPM == 750)
+carStats = CarStats((0...10).map { parkedPt(Double($0), [0x10: 0, 0x0C: 0]) })
+precondition(carStats.idleTime == 0 && carStats.avgRPM == 0 && carStats.time == 10)
+precondition(CarStats(moving).samples == 0 && CarStats([]).litres == 0)
+
+// One fuel figure for every screen: measured where the car reported, the estimate for the rest
+var tf = tripFuel(distance: 10_000, carLitres: 0, carDistance: 0, per100: 7, correction: 1.1)
+precondition(abs(tf.litres - 0.7) < 1e-9 && tf.source == "szac.")
+tf = tripFuel(distance: 10_000, carLitres: 0.6, carDistance: 9_900, per100: 7, correction: 1.1)
+precondition(abs(tf.litres - 0.667) < 1e-9 && tf.source == "auto", "\(tf.litres)")
+tf = tripFuel(distance: 10_000, carLitres: 0.3, carDistance: 5_000, per100: 7, correction: 1)
+precondition(abs(tf.litres - 0.65) < 1e-9 && tf.source == "auto + szac.")
+precondition(tripFuel(distance: 0, carLitres: 0.2, carDistance: 0, per100: 7, correction: 0).litres == 0.2, "correction 0 is ignored")
+precondition(formatPer100(6.84, locale: polish) == "6,8 l/100 km")
+
+// Charts and export
+let rpmSeries = carSeries(driven, maxPoints: 10) { $0[0x0C] }
+precondition(rpmSeries.count >= 10 && rpmSeries.count <= 11 && rpmSeries[0].value == 2000 && carSeries(moving, fuelRate).isEmpty)
+let carRows = csv(Array(driven.prefix(2)) + [moving[0]]).split(separator: "\n", omittingEmptySubsequences: false).dropLast()
+precondition(carRows.count == 4 && carRows.allSatisfy { $0.split(separator: ",", omittingEmptySubsequences: false).count == 10 }, "every row has every column")
+precondition(carRows[0].hasSuffix(",Temperatura płynu chłodzącego [°C],Obroty silnika [obr./min],Zużycie paliwa [l/h]"), String(carRows[0]))
+precondition(carRows[1].hasSuffix(",60,2000,3.60") && carRows[3].hasSuffix(",,,"), String(carRows[1]))
+precondition(obdParameters.values.allSatisfy { !$0.name.contains(",") && !$0.unit.contains(",") })
+let monthsWithCar = summarize([Trip(url: URL(fileURLWithPath: "/a.jsonl"), points: driven)], by: .month)
+precondition(abs(monthsWithCar[0].carLitres - 0.1) < 1e-9 && abs(monthsWithCar[0].carDistance - 2000) < 5)
+
 precondition(looksLikeOBDAdapter("IOS-Vlink") && looksLikeOBDAdapter("Vgate iCar2") && looksLikeOBDAdapter("OBDII"))
 precondition(!looksLikeOBDAdapter("AirPods Pro") && !looksLikeOBDAdapter("Mi Band"))
 print("OK")

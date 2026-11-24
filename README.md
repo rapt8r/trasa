@@ -33,3 +33,9 @@ dopisywany na bieżąco, więc przerwanie działania aplikacji nie kasuje nagran
 Ekran "Samochód" łączy się przez Bluetooth LE z adapterem zgodnym z ELM327 w gnieździe OBD.
 Aplikacja pyta auto, które parametry obsługuje, i tylko je odczytuje. Niczego w aucie nie zmienia
 i nie kasuje kodów błędów. Dziennik połączenia zostaje w telefonie, dopóki użytkownik sam go nie wyśle.
+
+Raz połączony adapter jest zapamiętany i łączy się sam, gdy aplikacja jest w użyciu ("Rozłącz" to wyłącza).
+Podczas nagrywania wartości z auta są dopisywane do punktów GPS w pliku trasy (pole `car`, klucz to numer
+parametru OBD). Zapisywane są surowe wartości; paliwo liczy się z nich przy wyświetlaniu: z parametru
+"zużycie paliwa" (0x5E), a gdy auto go nie podaje, z przepływu powietrza (MAF, benzyna 14,7:1, 745 g/l).
+Odcinki bez danych auta dolicza szacunek z Ustawień. Korekta spalania w Ustawieniach mnoży wynik z auta.

@@ -13,6 +13,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         case bluetoothOff
         case unauthorized
         case scanning
+        case waiting(String)   // the remembered adapter is not in reach yet; it connects by itself when it appears
         case connecting(String)
         case reading(String)   // talking to the adapter / car, with what is being done
         case ready             // values are being read continuously
@@ -42,6 +43,10 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     static let commandTimeout = 3.0    // s
     static let firstContactTimeout = 15.0 // s; the adapter tries every protocol on the first request
     static let maxLogLines = 1500
+    static let retryInterval = 20.0    // s between automatic attempts after a failure
+    static let silentLimit = 10        // requests in a row without an answer before the car counts as gone
+    static let adapterIDKey = "obdAdapterID"
+    static let adapterNameKey = "obdAdapterName"
     /// GATT services every Bluetooth device has; the adapter's serial channel is never one of these.
     static let standardServices: Set<String> = ["1800", "1801", "180A", "180F"]
 
@@ -53,6 +58,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published private(set) var rate = 0.0
     /// Everything exchanged with the adapter during set-up. Not published: it changes too often.
     private(set) var log: [String] = []
+    /// Latest decoded values with the time each was read. Not published: `readings` drives the screen.
+    private(set) var car = CarValues()
     var logText: String { log.joined(separator: "\n") }
 
     private var central: CBCentralManager?
@@ -69,12 +76,14 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var logCommands = true
     private var session: Task<Void, Never>?
     private var engine = "7E8"
+    private var adapterName = ""
+    private var failedAt = Date.distantPast
 
     // MARK: Scanning and connecting
 
     /// Looks for adapters nearby. The Bluetooth permission question appears on the first call.
     func startScan() {
-        disconnect()
+        suspend()
         devices = []
         otherDevices = 0
         log = []
@@ -110,6 +119,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         note("Znaleziono innych urządzeń: \(otherDevices)")
         note("Łączę z: \(device.name)")
         userDisconnected = false
+        adapterName = device.name
         peripheral = device.peripheral
         device.peripheral.delegate = self
         state = .connecting(device.name)
@@ -121,7 +131,40 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
 
+    /// Connects to the adapter used last time, whenever it comes into reach. Does nothing when no
+    /// adapter is remembered, when something is already going on, or right after a failure.
+    func autoConnect() {
+        guard let id = UserDefaults.standard.string(forKey: Self.adapterIDKey).flatMap(UUID.init(uuidString:)) else { return }
+        switch state {
+        case .idle, .failed, .bluetoothOff: break
+        default: return
+        }
+        guard Date().timeIntervalSince(failedAt) >= Self.retryInterval else { return }
+        guard let central else {
+            central = CBCentralManager(delegate: self, queue: nil) // comes back here from centralManagerDidUpdateState
+            return
+        }
+        guard central.state == .poweredOn, let known = central.retrievePeripherals(withIdentifiers: [id]).first else { return }
+        adapterName = UserDefaults.standard.string(forKey: Self.adapterNameKey) ?? known.name ?? "adapter"
+        note("Łączę automatycznie z: \(adapterName)")
+        userDisconnected = false
+        peripheral = known
+        known.delegate = self
+        state = .waiting(adapterName)
+        central.connect(known, options: nil) // no timeout: it stays pending until the adapter is in reach
+    }
+
+    /// The user's "Rozłącz": also forgets the adapter, so nothing reconnects by itself.
     func disconnect() {
+        UserDefaults.standard.removeObject(forKey: Self.adapterIDKey)
+        UserDefaults.standard.removeObject(forKey: Self.adapterNameKey)
+        suspend()
+    }
+
+    /// Ends the connection but keeps the adapter remembered. Also called when the app goes to the
+    /// background without recording: it would otherwise go on asking the car, which keeps the
+    /// adapter awake on the car's battery.
+    func suspend() {
         userDisconnected = true
         session?.cancel()
         session = nil
@@ -133,6 +176,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         finish(nil)
         info = []
         readings = []
+        car.clear()
         rate = 0
         state = .idle
     }
@@ -147,6 +191,11 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         tx = nil
         rx = nil
         finish(nil)
+        // Old values must not pass for current ones, on the screen or in a trip being recorded.
+        readings = []
+        car.clear()
+        rate = 0
+        failedAt = Date()
         state = .failed(message)
     }
 
@@ -161,7 +210,9 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if wantsScan {
             wantsScan = false
             beginScan()
-        } else if central.state != .poweredOn, peripheral != nil {
+        } else if central.state == .poweredOn {
+            autoConnect()
+        } else if peripheral != nil {
             fail("Bluetooth został wyłączony.")
         }
     }
@@ -396,23 +447,32 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         ]
         note("Obsługiwane parametry (\(dataPIDs.count)): " + hexString(dataPIDs))
         note("Koniec rozpoznania. Dalej tylko odczyt wartości na żywo (nie jest zapisywany w dzienniku).")
+        if let peripheral {
+            // Remembered from here on: next time it connects by itself.
+            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.adapterIDKey)
+            UserDefaults.standard.set(adapterName, forKey: Self.adapterNameKey)
+        }
         state = .ready
         logCommands = false
 
-        // Live values: round and round over the parameters this app can decode.
+        // Live values: engine speed, road speed and fuel flow every round, the rest one per round in turn.
         let live = dataPIDs.filter { obdParameters[$0] != nil }
         var silent = 0
         var answered = 0
+        var round = 0
         var windowStart = Date()
         while !Task.isCancelled, state == .ready, !live.isEmpty {
-            for pid in live {
+            round += 1
+            for pid in pollRound(live, round: round) {
                 guard !Task.isCancelled, state == .ready else { return }
                 if await read(pid) {
                     silent = 0
                     answered += 1
                 } else {
+                    // Ended from outside (disconnect, failure): not this loop's business any more.
+                    guard !Task.isCancelled else { return }
                     silent += 1
-                    if silent >= 2 * live.count {
+                    if silent >= Self.silentLimit {
                         fail("Auto przestało odpowiadać. Jeśli zapłon został wyłączony, to normalne.")
                         return
                     }
@@ -436,7 +496,13 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
               let data = pidData(frames, pid: pid, ecu: engine),
               let index = readings.firstIndex(where: { $0.pid == pid }) else { return false }
         if readings[index].data != data { readings[index].data = data }
+        if let value = obdParameters[pid]?.decode(data) { car.set(pid, value, at: Date()) }
         return true
+    }
+
+    /// What the car reported since the last call, to be saved with a GPS fix; nil when not connected.
+    func takeCarValues() -> [Int: Double]? {
+        state == .ready ? car.take(at: Date()) : nil
     }
 
     private func protocolName(_ number: String) -> String {

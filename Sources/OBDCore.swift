@@ -195,6 +195,60 @@ func pidData(_ frames: [OBDFrame], pid: UInt8, ecu: String) -> [UInt8]? {
     return Array(frame.bytes.dropFirst(2))
 }
 
+// MARK: Reading while driving
+
+/// Read every round: what the fuel figure and the gauges are made of.
+let obdFastPIDs: [UInt8] = [0x0C, 0x0D, 0x10, 0x5E]
+
+/// The parameters to read in round number `round`: the fast ones every time, the others one per round in turn.
+// ponytail: one request per parameter; CAN allows six in one request if the rate turns out too low on the car.
+func pollRound(_ live: [UInt8], round: Int) -> [UInt8] {
+    let fast = live.filter { obdFastPIDs.contains($0) }, slow = live.filter { !obdFastPIDs.contains($0) }
+    return slow.isEmpty ? fast : fast + [slow[max(0, round) % slow.count]]
+}
+
+let carValueMaxAge = 5.0 // s; an older reading is not saved with a fix any more
+
+/// The latest decoded value of each parameter (keyed by its number) with the time it was read.
+struct CarValues {
+    private(set) var values: [Int: Double] = [:]
+    private var times: [Int: Date] = [:]
+    private var taken = Date.distantPast
+
+    mutating func set(_ pid: UInt8, _ value: Double, at time: Date) {
+        values[Int(pid)] = value
+        times[Int(pid)] = time
+    }
+
+    mutating func clear() {
+        values = [:]
+        times = [:]
+    }
+
+    /// Readings made since the last call, for the trip file: each is saved once, and never a stale one.
+    mutating func take(at now: Date) -> [Int: Double]? {
+        let since = max(taken, now.addingTimeInterval(-carValueMaxAge))
+        taken = now
+        let fresh = values.filter { (times[$0.key] ?? .distantPast) > since }
+        return fresh.isEmpty ? nil : fresh
+    }
+}
+
+// MARK: Fuel from the car
+
+// Petrol. Both are averages; the correction factor in Settings absorbs the difference for a given car.
+let petrolAirFuelRatio = 14.7 // g of air burnt per g of petrol
+let petrolDensity = 745.0     // g per litre
+
+/// Fuel flow in l/h: the car's own figure if it reports one, otherwise worked out from the air it draws.
+// ponytail: on engine braking the injectors are shut but air still flows, so the air-flow path reads high;
+// subtract those stretches (fuel system status, PID 0x03) if the correction factor is not enough.
+func fuelRate(_ car: [Int: Double]) -> Double? {
+    if let direct = car[0x5E] { return direct }
+    if let maf = car[0x10] { return maf / petrolAirFuelRatio / petrolDensity * 3600 }
+    return nil
+}
+
 func hexString(_ bytes: [UInt8]) -> String {
     bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
 }

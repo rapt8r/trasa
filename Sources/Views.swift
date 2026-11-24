@@ -20,6 +20,7 @@ struct TrasaApp: App {
 enum Prefs {
     static let fuelPer100 = "fuelPer100"     // l / 100 km
     static let fuelPrice = "fuelPrice"       // zł / l
+    static let fuelCorrection = "fuelCorrection" // multiplies the fuel the car measured
     static let speedLimits = "showSpeedLimits"
     static let traffic = "showTraffic"
     static let placeNames = "showPlaceNames"
@@ -253,6 +254,54 @@ struct Puck: View {
     }
 }
 
+/// What the engine is doing right now, on the map opposite the speed limit sign. Its own view,
+/// so it alone redraws when a reading changes.
+struct CarGauges: View {
+    @EnvironmentObject var obd: OBDAdapter
+    @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
+
+    var body: some View {
+        let car = obd.car.values
+        let fuel = liveConsumption(car, correction: fuelCorrection)
+        if obd.state == .ready, !obd.readings.isEmpty, fuel != nil || car[0x0C] != nil {
+            VStack(alignment: .trailing, spacing: 2) {
+                if let fuel {
+                    let number = String(format: "%.1f", locale: Locale.current, fuel.value)
+                    gauge(number, fuel.per100 ? "l/100 km" : "l/h")
+                        .accessibilityLabel("Spalanie \(number) " + (fuel.per100 ? "litra na sto kilometrów" : "litra na godzinę"))
+                }
+                if let rpm = car[0x0C] {
+                    // To the nearest 50: the last digits only flicker.
+                    let number = String(format: "%.0f", (rpm / 50).rounded() * 50)
+                    gauge(number, "obr./min")
+                        .accessibilityLabel("Obroty \(number) na minutę")
+                }
+                if let coolant = car[0x05] {
+                    let number = String(format: "%.0f", coolant)
+                    gauge(number, "°C")
+                        .accessibilityLabel("Temperatura silnika \(number) stopni")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: .black.opacity(0.3), radius: 4, y: 1)
+        }
+    }
+
+    private func gauge(_ value: String, _ unit: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(value)
+                .font(.system(.title2, design: .rounded).weight(.bold))
+                .monospacedDigit()
+            Text(unit)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+    }
+}
+
 // MARK: Map screen
 
 struct RecordView: View {
@@ -270,6 +319,8 @@ struct RecordView: View {
     /// Dark where the car is: the sun is down there. Otherwise the phone's own appearance is used.
     @State private var night = false
     @State private var gps = GPSStatus.good
+    /// Coolant temperature while the engine runs cold; nil when it is warm, off or not connected.
+    @State private var coldEngine: Int?
     // When GPS goes quiet nothing else would notice, so the fix's age is checked on a timer.
     private let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -284,7 +335,20 @@ struct RecordView: View {
             }
         }
         if recorder.isPaused { return Notice(icon: "pause.fill", text: "Nagrywanie wstrzymane") }
+        if let coldEngine { return Notice(icon: "thermometer.low", text: "Silnik zimny · \(coldEngine) °C") }
         return nil
+    }
+
+    /// The car is not observed here (its values change many times a second), so it is looked at on the timer.
+    private func refreshCar() {
+        // A remembered adapter is retried while the app is in use; never from a suspended app.
+        if scenePhase == .active || recorder.isRecording { obd.autoConnect() }
+        let car = obd.car.values
+        var cold: Int?
+        if let rpm = car[0x0C], rpm >= engineRunningRPM, let coolant = car[0x05], coolant < engineColdBelow {
+            cold = Int(coolant.rounded())
+        }
+        if cold != coldEngine { coldEngine = cold }
     }
 
     private func refreshGPS() {
@@ -304,11 +368,17 @@ struct RecordView: View {
                 }
             }
             .animation(.spring(duration: 0.45), value: notice)
-            .onReceive(statusTimer) { _ in refreshGPS() }
+            .onReceive(statusTimer) { _ in
+                refreshGPS()
+                refreshCar()
+            }
             .overlay(alignment: .topLeading) {
                 if let limit = road.speedLimit {
                     SpeedLimitSign(limit: limit, exceeded: over).padding(12)
                 }
+            }
+            .overlay(alignment: .topTrailing) {
+                CarGauges().environmentObject(obd).padding(12)
             }
             // Short taps for discrete events only: recording started or stopped, paused, limit crossed.
             .sensoryFeedback(.impact(weight: .medium), trigger: recorder.isRecording)
@@ -318,8 +388,17 @@ struct RecordView: View {
             .onAppear {
                 recorder.requestPermission()
                 motion.setRunning(true)
+                // Car values ride along with the GPS fixes of a recording.
+                let adapter = obd
+                recorder.carValues = { [weak adapter] in adapter?.takeCarValues() }
+                obd.autoConnect()
             }
-            .onChange(of: scenePhase) { motion.setRunning(scenePhase == .active) }
+            .onChange(of: scenePhase) {
+                motion.setRunning(scenePhase == .active)
+                if scenePhase == .active { obd.autoConnect() }
+                // Off the screen and not recording: stop asking the car, or the adapter never sleeps.
+                if scenePhase == .background, !recorder.isRecording { obd.suspend() }
+            }
             .onChange(of: recorder.live?.t) {
                 guard let p = recorder.live else {
                     motion.feed(nil)
@@ -453,6 +532,7 @@ struct DriveSheet: View {
     let gMeter: GMeter
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
+    @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
     @AppStorage(Prefs.placeNames) private var showPlaceNames = true
 
     var body: some View {
@@ -671,7 +751,9 @@ struct DriveSheet: View {
     private func currentTrip(_ stats: TripStats) -> some View {
         if recorder.isRecording || recorder.isReplaying {
             let live = recorder.live
-            let fuel = fuelUsed(distance: stats.distance, per100: fuelPer100)
+            let car = CarStats(recorder.points)
+            let fuel = tripFuel(distance: stats.distance, carLitres: car.litres, carDistance: car.distance,
+                                per100: fuelPer100, correction: fuelCorrection)
             let altitude = live.map { String(format: "%.0f m", $0.alt) } ?? "–"
             let heading = live?.course.map { compass($0) } ?? "–"
             let accuracy = live.map { String(format: "±%.0f m", $0.hAcc) } ?? "–"
@@ -683,8 +765,15 @@ struct DriveSheet: View {
                     }
                     Divider()
                     GridRow {
-                        Metric(label: "Paliwo (szac.)", value: formatLitres(fuel))
-                        Metric(label: "Koszt (szac.)", value: formatCost(fuel * fuelPrice))
+                        Metric(label: "Paliwo (\(fuel.source))", value: formatLitres(fuel.litres))
+                        Metric(label: "Koszt (\(fuel.source))", value: formatCost(fuel.litres * fuelPrice))
+                    }
+                    if car.time > 0 {
+                        Divider()
+                        GridRow {
+                            Metric(label: "Średnie spalanie", value: car.per100.map { formatPer100($0 * fuelCorrection) } ?? "–")
+                            Metric(label: "Na biegu jałowym", value: formatDuration(car.idleTime))
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -734,6 +823,7 @@ struct StatsView: View {
     @EnvironmentObject var recorder: Recorder
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
+    @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
     @State private var weekly = false
 
     var body: some View {
@@ -817,8 +907,14 @@ struct StatsView: View {
     }
 
     private func summary(_ period: PeriodSummary) -> String {
-        let cost = fuelUsed(distance: period.distance, per100: fuelPer100) * fuelPrice
-        return "\(tripsLabel(period.count)) · \(formatShortDuration(period.duration)) · \(formatCost(cost))"
+        let fuel = tripFuel(distance: period.distance, carLitres: period.carLitres, carDistance: period.carDistance,
+                            per100: fuelPer100, correction: fuelCorrection)
+        var text = "\(tripsLabel(period.count)) · \(formatShortDuration(period.duration)) · \(formatCost(fuel.litres * fuelPrice))"
+        // Real consumption, once the car has measured enough of the period to say.
+        if period.carDistance >= 1000 {
+            text += " · " + formatPer100(period.carLitres * fuelCorrection / period.carDistance * 100_000)
+        }
+        return text
     }
 }
 
@@ -835,11 +931,11 @@ struct CarView: View {
                 switch obd.state {
                 case .idle, .failed, .bluetoothOff, .unauthorized:
                     Button("Szukaj adaptera") { obd.startScan() }
-                case .scanning, .connecting, .reading, .ready:
+                case .scanning, .waiting, .connecting, .reading, .ready:
                     Button("Rozłącz", role: .destructive) { obd.disconnect() }
                 }
             } footer: {
-                Text("Włóż adapter w gniazdo OBD pod kierownicą i włącz zapłon. Journey tylko odczytuje dane, niczego w aucie nie zmienia.")
+                Text("Włóż adapter w gniazdo OBD pod kierownicą i włącz zapłon. Journey tylko odczytuje dane, niczego w aucie nie zmienia.\n\nRaz połączony adapter łączy się potem sam. Podczas nagrywania dane auta zapisują się razem z trasą: spalanie, obroty i temperaturę zobaczysz w widoku przejazdu. „Rozłącz” wyłącza też automatyczne łączenie.")
             }
 
             if obd.state == .scanning {
@@ -926,6 +1022,11 @@ struct CarView: View {
             }
         case .scanning:
             Label("Szukam adaptera", systemImage: "dot.radiowaves.left.and.right")
+        case .waiting(let name):
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Czekam na adapter \(name). Połączy się sam, gdy będzie w zasięgu.")
+            }
         case .connecting(let name):
             HStack(spacing: 12) {
                 ProgressView()
@@ -989,6 +1090,7 @@ struct CarLogView: View {
 struct SettingsView: View {
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
+    @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
     @AppStorage(Prefs.speedLimits) private var showSpeedLimits = true
     @AppStorage(Prefs.traffic) private var showTraffic = true
     @AppStorage(Prefs.placeNames) private var showPlaceNames = true
@@ -1006,10 +1108,15 @@ struct SettingsView: View {
                         .keyboardType(.decimalPad)
                         .multilineTextAlignment(.trailing)
                 }
+                LabeledContent("Korekta spalania z auta (×)") {
+                    TextField("1", value: $fuelCorrection, format: .number)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                }
             } header: {
                 Text("Paliwo")
             } footer: {
-                Text("Koszt przejazdu to szacunek: dystans × spalanie × cena.")
+                Text("Z adapterem OBD paliwo jest liczone z danych auta; bez niego to szacunek: dystans × spalanie × cena. Jeśli po tankowaniu wyjdzie inne spalanie niż pokazuje Journey, wpisz w korekcie rzeczywiste podzielone przez pokazane (np. 1,08).")
             }
             Section {
                 Toggle("Dane o drogach", isOn: $showSpeedLimits)
@@ -1041,8 +1148,12 @@ struct TripDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
+    @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
     @State private var gpxURL: URL?
     @State private var csvURL: URL?
+    @State private var rpmSeries: [CarPoint] = []
+    @State private var fuelSeries: [CarPoint] = []
+    @State private var coolantSeries: [CarPoint] = []
     @State private var satellite = false
     @State private var confirmDelete = false
     @AppStorage(Prefs.placeNames) private var showPlaceNames = true
@@ -1065,10 +1176,68 @@ struct TripDetailView: View {
                                width: maxX - minX + margin * 2, height: maxY - minY + margin * 2.6))
     }
 
+    /// What the car reported during the trip: the engine's numbers, then a chart for each figure it gave.
+    @ViewBuilder
+    private func carCards(_ car: CarStats) -> some View {
+        Card(title: "Silnik") {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
+                if car.time > 0 {
+                    GridRow {
+                        Metric(label: "Średnie spalanie", value: car.per100.map { formatPer100($0 * fuelCorrection) } ?? "–")
+                        Metric(label: "Paliwo na postoju", value: formatLitres(car.idleLitres * fuelCorrection))
+                    }
+                    Divider()
+                }
+                GridRow {
+                    Metric(label: "Średnie obroty", value: String(format: "%.0f obr./min", car.avgRPM))
+                    Metric(label: "Najwyższe obroty", value: String(format: "%.0f obr./min", car.maxRPM))
+                }
+                Divider()
+                GridRow {
+                    Metric(label: "Na biegu jałowym", value: formatDuration(car.idleTime))
+                    Metric(label: "Najwyższa temp. silnika", value: car.maxCoolant.map { String(format: "%.0f °C", $0) } ?? "–")
+                }
+                if let warmUp = car.warmUp {
+                    Divider()
+                    GridRow {
+                        Metric(label: "Rozgrzewanie do \(Int(engineWarmAt)) °C", value: formatShortDuration(warmUp))
+                        Color.clear.frame(height: 1)
+                    }
+                }
+            }
+            if car.time > 0, car.time < trip.stats.duration * 0.95 {
+                Text("Auto podawało spalanie przez \(formatShortDuration(car.time)) z \(formatShortDuration(trip.stats.duration)) przejazdu. Resztę paliwa policzono ze spalania wpisanego w Ustawieniach.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        carChart("Spalanie chwilowe", unit: "l/h", fuelSeries.map { CarPoint(t: $0.t, value: $0.value * fuelCorrection) }, .orange)
+        carChart("Obroty", unit: "obr./min", rpmSeries, .purple)
+        carChart("Temperatura silnika", unit: "°C", coolantSeries, .red)
+    }
+
+    @ViewBuilder
+    private func carChart(_ title: String, unit: String, _ series: [CarPoint], _ color: Color) -> some View {
+        if series.count > 1 {
+            Card(title: title) {
+                Chart(series) { p in
+                    LineMark(x: .value("Czas", p.t), y: .value(unit, p.value))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(color)
+                }
+                .chartYAxisLabel(unit)
+                .frame(height: 140)
+                .accessibilityLabel("\(title) w czasie przejazdu")
+            }
+        }
+    }
+
     var body: some View {
         let s = trip.stats
         let chunks = speedChunks(trip.points)
-        let fuel = fuelUsed(distance: s.distance, per100: fuelPer100)
+        let car = trip.car
+        let fuel = tripFuel(distance: s.distance, carLitres: car.litres, carDistance: car.distance,
+                            per100: fuelPer100, correction: fuelCorrection)
         let end = trip.points.last?.t ?? trip.start
         // Charts get at most ~300 samples; the map and the files keep every point.
         let samples = stride(from: 0, to: trip.points.count, by: max(1, trip.points.count / 300)).map { trip.points[$0] }
@@ -1170,11 +1339,13 @@ struct TripDetailView: View {
                         }
                         Divider()
                         GridRow {
-                            Metric(label: "Paliwo (szac.)", value: formatLitres(fuel))
-                            Metric(label: "Koszt (szac.)", value: formatCost(fuel * fuelPrice))
+                            Metric(label: "Paliwo (\(fuel.source))", value: formatLitres(fuel.litres))
+                            Metric(label: "Koszt (\(fuel.source))", value: formatCost(fuel.litres * fuelPrice))
                         }
                     }
                 }
+
+                if car.samples > 0 { carCards(car) }
 
                 Card(title: "Prędkość") {
                     Chart(samples, id: \.t) { p in
@@ -1210,7 +1381,7 @@ struct TripDetailView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Text("Zapisano punktów GPS: \(trip.points.count)")
+                Text("Zapisano punktów GPS: \(trip.points.count)" + (car.samples > 0 ? ", z danymi auta: \(car.samples)" : ""))
                     .font(.footnote)
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity)
@@ -1220,6 +1391,12 @@ struct TripDetailView: View {
         }
         .navigationTitle(tripDateTitle(trip.start))
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            // Thinned once, not on every redraw.
+            rpmSeries = carSeries(trip.points) { $0[0x0C] }
+            fuelSeries = carSeries(trip.points, fuelRate)
+            coolantSeries = carSeries(trip.points) { $0[0x05] }
+        }
         .confirmationDialog("Usunąć tę trasę?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Usuń trasę", role: .destructive) {
                 recorder.delete(trip)
