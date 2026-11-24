@@ -238,6 +238,21 @@ struct SpeedLimitSign: View {
     }
 }
 
+/// Outside air temperature as the car's own sensor reports it, in the column of signs.
+struct OutsideTempSign: View {
+    let celsius: Int
+
+    var body: some View {
+        Text("\(celsius)°")
+            .font(.system(size: celsius <= -10 ? 22 : 26, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .frame(width: 66, height: 66) // the size of the limit sign above it
+            .background(.regularMaterial, in: Circle())
+            .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+            .accessibilityLabel("Temperatura na zewnątrz \(celsius) stopni")
+    }
+}
+
 /// The engine is still cold: a snowflake under the speed limit sign, until the coolant warms up.
 struct ColdEngineSign: View {
     let coolant: Int
@@ -336,6 +351,8 @@ struct RecordView: View {
     @State private var gps = GPSStatus.good
     /// Coolant temperature while the engine runs cold; nil when it is warm, off or not connected.
     @State private var coldEngine: Int?
+    /// Outside air temperature from the car, when it reports one.
+    @State private var outsideTemp: Int?
     // When GPS goes quiet nothing else would notice, so the fix's age is checked on a timer.
     private let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -363,6 +380,8 @@ struct RecordView: View {
             cold = Int(coolant.rounded())
         }
         if cold != coldEngine { coldEngine = cold }
+        let outside = car[0x46].map { Int($0.rounded()) }
+        if outside != outsideTemp { outsideTemp = outside }
     }
 
     private func refreshGPS() {
@@ -392,12 +411,16 @@ struct RecordView: View {
                     if let limit = road.speedLimit {
                         SpeedLimitSign(limit: limit, exceeded: over)
                     }
+                    if let outsideTemp {
+                        OutsideTempSign(celsius: outsideTemp).transition(.scale.combined(with: .opacity))
+                    }
                     if let coldEngine {
                         ColdEngineSign(coolant: coldEngine).transition(.scale.combined(with: .opacity))
                     }
                 }
                 .padding(12)
                 .animation(.spring(duration: 0.45), value: coldEngine != nil)
+                .animation(.spring(duration: 0.45), value: outsideTemp != nil)
             }
             .overlay(alignment: .topTrailing) {
                 CarGauges().environmentObject(obd).padding(12)
