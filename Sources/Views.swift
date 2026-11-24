@@ -24,6 +24,8 @@ enum Prefs {
     static let speedLimits = "showSpeedLimits"
     static let traffic = "showTraffic"
     static let placeNames = "showPlaceNames"
+    static let autoRecord = "autoRecord"     // start and stop recording with the engine
+    static let tankLitres = "tankLitres"
 }
 
 /// Screens pushed inside the bottom sheet.
@@ -253,6 +255,51 @@ struct OutsideTempSign: View {
     }
 }
 
+/// Fuel is low: a pump with roughly how far it will last. Stations are then marked on the map and
+/// listed in the sheet.
+struct LowFuelSign: View {
+    let range: Int? // km
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Image(systemName: "fuelpump.fill")
+                .font(.system(size: range == nil ? 28 : 20, weight: .semibold))
+                .foregroundStyle(.orange)
+            if let range {
+                Text("\(range) km")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+        }
+        .padding(.horizontal, 6)
+        .frame(width: 66, height: 66) // the size of the limit sign above it
+        .background(.regularMaterial, in: Circle())
+        .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(range.map { "Mało paliwa, wystarczy na około \($0) kilometrów" } ?? "Mało paliwa")
+    }
+}
+
+/// The big speed number. With the car connected it follows the car's own speed, read several times
+/// a second (GPS gives one a second). Its own view, so only the number redraws.
+struct SpeedNumber: View {
+    @EnvironmentObject var obd: OBDAdapter
+    let gps: Double // km/h
+    let over: Bool
+
+    var body: some View {
+        let kmh = obd.state == .ready ? obd.car.values[0x0D] ?? gps : gps
+        Text(String(format: "%.0f", kmh))
+            .font(.system(size: 64, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(over ? Color.red : Color.primary) // the sign also grows: not colour alone
+            .contentTransition(.numericText(value: kmh))
+            .animation(.snappy(duration: 0.25), value: kmh.rounded())
+    }
+}
+
 /// The engine is still cold: a snowflake under the speed limit sign, until the coolant warms up.
 struct ColdEngineSign: View {
     let coolant: Int
@@ -339,10 +386,16 @@ struct RecordView: View {
     let places: TripPlaces
     @EnvironmentObject var recorder: Recorder
     @StateObject private var road = RoadInfo()
+    @StateObject private var stations = Stations()
     // Not observed here on purpose: it changes every frame, and only MapLayer needs to redraw then.
     @State private var motion = Motion()
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(Prefs.speedLimits) private var useRoadData = true
+    @AppStorage(Prefs.autoRecord) private var autoRecordOn = true
+    @AppStorage(Prefs.tankLitres) private var tankLitres = 56.0
+    @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
+    @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
+    @State private var autoRecord = AutoRecord()
     @State private var detent = DriveSheet.compactDetent
     @State private var path: [Route] = []
     @State private var recenterRequests = 0
@@ -353,6 +406,9 @@ struct RecordView: View {
     @State private var coldEngine: Int?
     /// Outside air temperature from the car, when it reports one.
     @State private var outsideTemp: Int?
+    @State private var lowFuel = false
+    /// Kilometres the fuel should last, while it is low.
+    @State private var fuelRangeKm: Int?
     // When GPS goes quiet nothing else would notice, so the fix's age is checked on a timer.
     private let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -382,6 +438,32 @@ struct RecordView: View {
         if cold != coldEngine { coldEngine = cold }
         let outside = car[0x46].map { Int($0.rounded()) }
         if outside != outsideTemp { outsideTemp = outside }
+
+        let low = isLowFuel(level: car[0x2F], wasLow: lowFuel)
+        if low != lowFuel { lowFuel = low }
+        var range: Int?
+        if low, let level = car[0x2F] {
+            let per100 = planningPer100(recorder.trips, fallback: fuelPer100, correction: fuelCorrection)
+            // To the nearest 5 km: it is an estimate.
+            range = fuelRange(levelPercent: level, tankLitres: tankLitres, per100: per100).map { Int(($0 / 5).rounded()) * 5 }
+        }
+        if range != fuelRangeKm { fuelRangeKm = range }
+        stations.update(recorder.live, low: low)
+
+        // Recording with the engine. GPS speed tells a lost adapter on the road from a parked car.
+        let moving = gps != .searching && (recorder.live?.speed ?? 0) * 3.6 >= DriveSheet.movingSpeed
+        let action = autoRecord.update(engineRunning: (car[0x0C] ?? 0) >= engineRunningRPM, moving: moving,
+                                       recording: recorder.isRecording, now: Date())
+        guard autoRecordOn, !recorder.isReplaying else { return }
+        switch action {
+        case .start:
+            recorder.start()
+        case .stop:
+            if let saved = recorder.stop() { path = [.trip(saved)] }
+            if scenePhase == .background { obd.suspend() }
+        case .none:
+            break
+        }
     }
 
     private func refreshGPS() {
@@ -392,7 +474,7 @@ struct RecordView: View {
     var body: some View {
         let over = road.speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
         let notice = self.notice
-        MapLayer(motion: motion, recenterRequests: recenterRequests, lifted: notice != nil)
+        MapLayer(motion: motion, recenterRequests: recenterRequests, lifted: notice != nil, showStations: lowFuel)
             .overlay(alignment: .bottom) {
                 if let notice {
                     NoticePill(notice: notice)
@@ -417,9 +499,13 @@ struct RecordView: View {
                     if let coldEngine {
                         ColdEngineSign(coolant: coldEngine).transition(.scale.combined(with: .opacity))
                     }
+                    if lowFuel {
+                        LowFuelSign(range: fuelRangeKm).transition(.scale.combined(with: .opacity))
+                    }
                 }
                 .padding(12)
                 .animation(.spring(duration: 0.45), value: coldEngine != nil)
+                .animation(.spring(duration: 0.45), value: lowFuel)
                 .animation(.spring(duration: 0.45), value: outsideTemp != nil)
             }
             .overlay(alignment: .topTrailing) {
@@ -429,6 +515,7 @@ struct RecordView: View {
             .sensoryFeedback(.impact(weight: .medium), trigger: recorder.isRecording)
             .sensoryFeedback(.impact(weight: .light), trigger: recorder.isPaused)
             .sensoryFeedback(trigger: over) { _, isOver in isOver ? .warning : nil }
+            .sensoryFeedback(trigger: lowFuel) { _, isLow in isLow ? .warning : nil }
             .preferredColorScheme(night ? .dark : nil)
             .onAppear {
                 recorder.requestPermission()
@@ -466,7 +553,7 @@ struct RecordView: View {
                 }
             }
             .sheet(isPresented: .constant(true)) {
-                DriveSheet(detent: $detent, path: $path, street: road.street, speedLimit: road.speedLimit, gMeter: motion.gMeter)
+                DriveSheet(detent: $detent, path: $path, street: road.street, speedLimit: road.speedLimit, gMeter: motion.gMeter, stations: stations.nearby)
                     .environmentObject(recorder)
                     .environmentObject(obd)
                     .environmentObject(places)
@@ -488,6 +575,8 @@ struct MapLayer: View {
     let recenterRequests: Int
     /// A notice sits just above the sheet: keep the marker clear of it.
     let lifted: Bool
+    /// Fuel is low: petrol stations appear on the map.
+    let showStations: Bool
     @EnvironmentObject var recorder: Recorder
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(Prefs.traffic) private var showTraffic = true
@@ -511,8 +600,10 @@ struct MapLayer: View {
                 MapPolyline(coordinates: recorder.points.map(\.coordinate)).stroke(.blue, lineWidth: 8)
             }
         }
-        // No points of interest: while driving, shops and restaurants are clutter.
-        .mapStyle(.standard(elevation: .realistic, pointsOfInterest: .excludingAll, showsTraffic: showTraffic))
+        // No points of interest: while driving, shops and restaurants are clutter. Petrol stations when fuel is low.
+        .mapStyle(.standard(elevation: .realistic,
+                            pointsOfInterest: showStations ? .including([.gasStation]) : .excludingAll,
+                            showsTraffic: showTraffic))
         // The sheet's resting height never changes, so the map is laid out once and never resizes.
         .safeAreaPadding(.bottom, DriveSheet.compactHeight)
         .overlay(alignment: .bottomTrailing) {
@@ -575,6 +666,8 @@ struct DriveSheet: View {
     let street: String?
     let speedLimit: Int?
     let gMeter: GMeter
+    /// Petrol stations nearby; empty unless fuel is low.
+    let stations: [Stations.Station]
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
     @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
@@ -597,6 +690,7 @@ struct DriveSheet: View {
                         // and the texts shrink to their minimum scale (they may still shrink to fit the width).
                         .fixedSize(horizontal: false, vertical: true)
                     List {
+                        stationRows
                         currentTrip(stats)
                         savedTrips
                         Section {
@@ -715,10 +809,7 @@ struct DriveSheet: View {
         let over = speedLimit.map { isOverLimit(speed: recorder.live?.speed, limit: $0) } ?? false
         return HStack(alignment: .center, spacing: 16) {
             VStack(spacing: -2) {
-                Text(String(format: "%.0f", kmh))
-                    .font(.system(size: 64, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(over ? Color.red : Color.primary) // the sign also grows: not colour alone
+                SpeedNumber(gps: kmh, over: over)
                 Text("km/h").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
             }
             .frame(minWidth: 100)
@@ -791,6 +882,44 @@ struct DriveSheet: View {
             }
             .buttonStyle(.plain)
             .layoutPriority(1)
+        }
+    }
+
+    /// Only while fuel is low: the nearest petrol stations, each opening directions in Maps.
+    @ViewBuilder
+    private var stationRows: some View {
+        if !stations.isEmpty {
+            let here = recorder.live.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+            let nearest = stations.sorted { a, b in
+                guard let here else { return false }
+                return a.location.distance(from: here) < b.location.distance(from: here)
+            }
+            Section {
+                ForEach(Array(nearest.prefix(5))) { station in
+                    Button {
+                        station.item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
+                    } label: {
+                        HStack {
+                            Image(systemName: "fuelpump.fill")
+                                .foregroundStyle(.orange)
+                                .frame(width: 28)
+                                .accessibilityHidden(true)
+                            Text(station.item.name ?? "Stacja paliw").foregroundStyle(Color.primary)
+                            Spacer()
+                            if let here {
+                                Text(String(format: "%.1f km", locale: Locale.current, station.location.distance(from: here) / 1000))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("Najbliższe stacje")
+            } footer: {
+                Text("Odległość w linii prostej. Dotknięcie otwiera trasę w Mapach Apple.")
+            }
+            .headerProminence(.increased)
         }
     }
 
@@ -1139,6 +1268,8 @@ struct SettingsView: View {
     @AppStorage(Prefs.fuelPer100) private var fuelPer100 = 7.0
     @AppStorage(Prefs.fuelPrice) private var fuelPrice = 6.5
     @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
+    @AppStorage(Prefs.tankLitres) private var tankLitres = 56.0
+    @AppStorage(Prefs.autoRecord) private var autoRecord = true
     @AppStorage(Prefs.speedLimits) private var showSpeedLimits = true
     @AppStorage(Prefs.traffic) private var showTraffic = true
     @AppStorage(Prefs.placeNames) private var showPlaceNames = true
@@ -1161,10 +1292,20 @@ struct SettingsView: View {
                         .keyboardType(.decimalPad)
                         .multilineTextAlignment(.trailing)
                 }
+                LabeledContent("Pojemność baku (l)") {
+                    TextField("56", value: $tankLitres, format: .number)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                }
             } header: {
                 Text("Paliwo")
             } footer: {
-                Text("Z adapterem OBD paliwo jest liczone z danych auta; bez niego to szacunek: dystans × spalanie × cena. Jeśli po tankowaniu wyjdzie inne spalanie niż pokazuje Journey, wpisz w korekcie rzeczywiste podzielone przez pokazane (np. 1,08).")
+                Text("Z adapterem OBD paliwo jest liczone z danych auta; bez niego to szacunek: dystans × spalanie × cena. Jeśli po tankowaniu wyjdzie inne spalanie niż pokazuje Journey, wpisz w korekcie rzeczywiste podzielone przez pokazane (np. 1,08). Gdy w baku zostaje 15% lub mniej, Journey pokazuje, na ile kilometrów wystarczy paliwa, i najbliższe stacje (z Map Apple, szukane wokół pozycji zaokrąglonej do ok. 1 km).")
+            }
+            Section {
+                Toggle("Nagrywaj razem z silnikiem", isOn: $autoRecord)
+            } footer: {
+                Text("Z połączonym adapterem OBD nagrywanie zaczyna się samo, gdy silnik pracuje, i kończy 2 minuty po jego wyłączeniu. Journey musi być wtedy otwarty. Po ręcznym Stop nie zacznie ponownie, dopóki nie zgasisz silnika.")
             }
             Section {
                 Toggle("Dane o drogach", isOn: $showSpeedLimits)

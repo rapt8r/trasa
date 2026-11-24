@@ -1,6 +1,7 @@
 import Combine
 import CoreLocation
 import Foundation
+import MapKit
 
 /// Speed limit (OpenStreetMap) and street name (Apple geocoder) for the current position.
 ///
@@ -146,6 +147,58 @@ final class RoadInfo: ObservableObject {
             guard let placemark = placemarks?.first else { return }
             let name = placemark.thoroughfare
             DispatchQueue.main.async { self?.street = name }
+        }
+    }
+}
+
+/// Petrol stations near the car, asked from Apple Maps only while fuel is low.
+///
+/// Privacy: the search is centred on the position rounded to about a kilometre, as for place names.
+final class Stations: ObservableObject {
+    struct Station: Identifiable {
+        let id = UUID()
+        let item: MKMapItem
+        let location: CLLocation
+    }
+
+    static let radius = 15_000.0          // m around the car
+    static let refreshDistance = 3_000.0  // m driven before asking again
+    static let retryDelay = 60.0          // s after a failed search (offline)
+    static let kept = 10
+
+    @Published private(set) var nearby: [Station] = []
+    private var searchedAt: CLLocation?
+    private var retryAfter = Date.distantPast
+    private var searching = false
+
+    /// Call on a timer. Searches when fuel has just become low and again every few kilometres.
+    func update(_ p: TrackPoint?, low: Bool) {
+        guard low else {
+            if !nearby.isEmpty { nearby = [] }
+            searchedAt = nil
+            return
+        }
+        guard let p, !searching, Date() >= retryAfter else { return }
+        let here = CLLocation(latitude: (p.lat * 100).rounded() / 100, longitude: (p.lon * 100).rounded() / 100)
+        if let searchedAt, here.distance(from: searchedAt) < Self.refreshDistance { return }
+        searching = true
+        searchedAt = here
+        let request = MKLocalPointsOfInterestRequest(center: here.coordinate, radius: Self.radius)
+        request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.gasStation])
+        MKLocalSearch(request: request).start { [weak self] response, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.searching = false
+                guard self.searchedAt != nil else { return } // fuel is no longer low
+                guard let items = response?.mapItems else {
+                    // Offline or refused: what was found before stays, and the search is tried again later.
+                    self.searchedAt = nil
+                    self.retryAfter = Date().addingTimeInterval(Self.retryDelay)
+                    return
+                }
+                let found = items.compactMap { item in item.placemark.location.map { Station(item: item, location: $0) } }
+                self.nearby = Array(found.sorted { $0.location.distance(from: here) < $1.location.distance(from: here) }.prefix(Self.kept))
+            }
         }
     }
 }

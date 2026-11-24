@@ -39,3 +39,8 @@ Podczas nagrywania wartości z auta są dopisywane do punktów GPS w pliku trasy
 parametru OBD). Zapisywane są surowe wartości; paliwo liczy się z nich przy wyświetlaniu: z parametru
 "zużycie paliwa" (0x5E), a gdy auto go nie podaje, z przepływu powietrza (MAF, benzyna 14,7:1, 745 g/l).
 Odcinki bez danych auta dolicza szacunek z Ustawień. Korekta spalania w Ustawieniach mnoży wynik z auta.
+
+Prędkościomierz pokazuje prędkość z auta, gdy adapter jest połączony (GPS decyduje nadal o mapie i limitach).
+Nagrywanie może zaczynać się i kończyć razem z silnikiem (Ustawienia, domyślnie włączone).
+Przy 15% paliwa lub mniej aplikacja liczy zasięg (poziom × pojemność baku ÷ spalanie) i pyta Mapy Apple
+o stacje w promieniu 15 km wokół pozycji zaokrąglonej do ok. 1 km; poza tym stanem o nic nie pyta.

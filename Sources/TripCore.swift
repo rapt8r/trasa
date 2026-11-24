@@ -498,6 +498,73 @@ func liveConsumption(_ car: [Int: Double], correction: Double) -> (value: Double
     return (rate, false)
 }
 
+// MARK: Low fuel
+
+let lowFuelPercent = 15.0       // % of the tank; at or under this the screen warns and shows stations
+let lowFuelHysteresis = 3.0     // % above that before the warning goes away: fuel sloshes in the tank
+let planningMinDistance = 50_000.0 // m the car must have measured before its average replaces the Settings figure
+
+func isLowFuel(level: Double?, wasLow: Bool) -> Bool {
+    guard let level else { return false }
+    if level <= lowFuelPercent { return true }
+    return wasLow && level <= lowFuelPercent + lowFuelHysteresis
+}
+
+/// l/100 km to plan with: what the car measured over the saved trips once that covers enough road,
+/// otherwise the Settings figure.
+func planningPer100(_ trips: [Trip], fallback: Double, correction: Double) -> Double {
+    let litres = trips.reduce(0) { $0 + $1.car.litres }, distance = trips.reduce(0) { $0 + $1.car.distance }
+    return distance >= planningMinDistance ? litres * fuelFactor(correction) / distance * 100_000 : fallback
+}
+
+/// Kilometres the fuel in the tank should last; nil when the inputs make no sense.
+func fuelRange(levelPercent: Double, tankLitres: Double, per100: Double) -> Double? {
+    guard tankLitres > 0, per100 > 0 else { return nil }
+    return max(0, levelPercent) / 100 * tankLitres / per100 * 100
+}
+
+// MARK: Recording with the engine
+
+let autoStopDelay = 120.0 // s with the engine off (or the adapter silent) and the car standing before a recording ends
+
+/// Decides when a recording should start and stop by itself. Fed on a timer.
+struct AutoRecord {
+    enum Action { case none, start, stop }
+
+    private var armed = true          // false after the user pressed Stop, until the engine has been off
+    private var wasRecording = false
+    private var stoppedIt = false
+    private var sawEngine = false     // the engine ran during this recording; without that it is never ended
+    private var offSince: Date?
+
+    /// - moving: GPS says the car is driving; then a silent adapter is a lost connection, not a parked car.
+    mutating func update(engineRunning: Bool, moving: Bool, recording: Bool, now: Date) -> Action {
+        if wasRecording, !recording, !stoppedIt { armed = false }
+        wasRecording = recording
+        stoppedIt = false
+        guard recording else {
+            sawEngine = false
+            offSince = nil
+            if !engineRunning {
+                armed = true
+                return .none
+            }
+            return armed ? .start : .none
+        }
+        if engineRunning { sawEngine = true }
+        if engineRunning || moving {
+            offSince = nil
+            return .none
+        }
+        guard sawEngine else { return .none }
+        let since = offSince ?? now
+        offSince = since
+        guard now.timeIntervalSince(since) >= autoStopDelay else { return .none }
+        stoppedIt = true
+        return .stop
+    }
+}
+
 struct CarPoint: Identifiable {
     let t: Date
     let value: Double

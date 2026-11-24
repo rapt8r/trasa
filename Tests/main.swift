@@ -402,6 +402,35 @@ precondition(abs(tf.litres - 0.65) < 1e-9 && tf.source == "auto + szac.")
 precondition(tripFuel(distance: 0, carLitres: 0.2, carDistance: 0, per100: 7, correction: 0).litres == 0.2, "correction 0 is ignored")
 precondition(formatPer100(6.84, locale: polish) == "6,8 l/100 km" && fuelFactor(0) == 1 && fuelFactor(-2) == 1 && fuelFactor(1.08) == 1.08)
 
+// Low fuel: warns at 15 %, lets go only above 18 %; range from the tank and the consumption
+precondition(isLowFuel(level: 15, wasLow: false) && !isLowFuel(level: 16, wasLow: false) && isLowFuel(level: 17, wasLow: true))
+precondition(!isLowFuel(level: 19, wasLow: true) && !isLowFuel(level: nil, wasLow: true))
+precondition(fuelRange(levelPercent: 10, tankLitres: 56, per100: 7) == 80 && fuelRange(levelPercent: 10, tankLitres: 56, per100: 0) == nil)
+let shortTrip = Trip(url: URL(fileURLWithPath: "/a.jsonl"), points: driven) // 2 km at 5 l/100 km
+precondition(planningPer100([shortTrip], fallback: 7, correction: 1) == 7, "too little measured: the Settings figure")
+precondition(abs(planningPer100(Array(repeating: shortTrip, count: 30), fallback: 7, correction: 1.1) - 5.5) < 0.03)
+
+// Recording with the engine
+var auto = AutoRecord()
+func autoStep(_ sec: Double, engine: Bool, moving: Bool = false, recording: Bool) -> AutoRecord.Action {
+    auto.update(engineRunning: engine, moving: moving, recording: recording, now: Date(timeIntervalSince1970: sec))
+}
+precondition(autoStep(0, engine: false, recording: false) == .none)
+precondition(autoStep(2, engine: true, recording: false) == .start, "engine on: start")
+precondition(autoStep(4, engine: true, recording: true) == .none)
+precondition(autoStep(100, engine: false, recording: true) == .none && autoStep(200, engine: false, recording: true) == .none, "a short stop keeps recording")
+precondition(autoStep(210, engine: true, recording: true) == .none && autoStep(300, engine: false, recording: true) == .none, "the wait starts again")
+precondition(autoStep(400, engine: false, moving: true, recording: true) == .none && autoStep(519, engine: false, recording: true) == .none, "driving with a silent adapter is not parking")
+precondition(autoStep(630, engine: false, recording: true) == .none && autoStep(640, engine: false, recording: true) == .stop, "engine off for two minutes: stop")
+precondition(autoStep(642, engine: false, recording: false) == .none && autoStep(644, engine: true, recording: false) == .start, "and the next drive starts again")
+// The user pressed Stop with the engine running: no restart until the engine has been off
+precondition(autoStep(646, engine: true, recording: true) == .none && autoStep(648, engine: true, recording: false) == .none)
+precondition(autoStep(650, engine: true, recording: false) == .none && autoStep(652, engine: false, recording: false) == .none)
+precondition(autoStep(654, engine: true, recording: false) == .start)
+// A recording made without the car is never ended by it
+auto = AutoRecord()
+precondition(autoStep(0, engine: false, recording: true) == .none && autoStep(1000, engine: false, recording: true) == .none)
+
 // Charts and export
 let rpmSeries = carSeries(driven, maxPoints: 10) { $0[0x0C] }
 precondition(rpmSeries.count >= 10 && rpmSeries.count <= 11 && rpmSeries[0].value == 2000 && carSeries(moving, fuelRate).isEmpty)
