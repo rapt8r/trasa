@@ -225,6 +225,9 @@ struct CarValues {
         times = [:]
     }
 
+    /// When the current value of a parameter was read.
+    func time(_ pid: UInt8) -> Date? { times[Int(pid)] }
+
     /// Readings made since the last call, for the trip file: each is saved once, and never a stale one.
     mutating func take(at now: Date) -> [Int: Double]? {
         let since = max(taken, now.addingTimeInterval(-carValueMaxAge))
@@ -268,6 +271,28 @@ func decodeDTCs(_ bytes: [UInt8]) -> [String] {
         codes.append(letters[Int(a >> 6)] + String(format: "%X%X%02X", (a >> 4) & 0x3, a & 0x0F, b))
     }
     return codes
+}
+
+/// What a trouble code is about, from the standard numbering. Not a diagnosis: the code names the
+/// circuit that reported, not the part that failed.
+func dtcArea(_ code: String) -> String {
+    let c = Array(code)
+    guard c.count == 5 else { return "nieznany kod" }
+    switch c[0] {
+    case "C": return "podwozie (hamulce, zawieszenie, układ kierowniczy)"
+    case "B": return "nadwozie (poduszki, klimatyzacja, oświetlenie)"
+    case "U": return "komunikacja między sterownikami"
+    default: break
+    }
+    if c[1] == "1" || c[1] == "3" { return "kod producenta auta (silnik lub skrzynia)" }
+    switch c[2] {
+    case "0", "1", "2": return "paliwo i powietrze (czujniki, wtryski, mieszanka)"
+    case "3": return "zapłon, wypadanie zapłonów"
+    case "4": return "emisja spalin (katalizator, EGR, odpowietrzanie zbiornika)"
+    case "5": return "prędkość auta i bieg jałowy"
+    case "6": return "sterownik silnika i jego wyjścia"
+    default: return "skrzynia biegów"
+    }
 }
 
 /// Names of Bluetooth devices that look like an OBD adapter.

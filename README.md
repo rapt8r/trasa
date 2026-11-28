@@ -44,3 +44,8 @@ Prędkościomierz pokazuje prędkość z auta, gdy adapter jest połączony (GPS
 Nagrywanie może zaczynać się i kończyć razem z silnikiem (Ustawienia, domyślnie włączone).
 Przy 15% paliwa lub mniej aplikacja liczy zasięg (poziom × pojemność baku ÷ spalanie) i pyta Mapy Apple
 o stacje w promieniu 15 km wokół pozycji zaokrąglonej do ok. 1 km; poza tym stanem o nic nie pyta.
+
+Ostrzeżenia z auta: możliwa gołoledź (do 3 °C na zewnątrz), wysoka temperatura silnika (od 115 °C) i niskie
+napięcie (poniżej 12 V przy pracującym silniku) - dwa ostatnie dopiero po kolejnych odczytach z rzędu.
+Progi to stałe w `TripCore.swift`. Nowe kody błędów są sygnalizowane znakiem, dopóki nie obejrzy się ich
+na ekranie "Samochód". Styl jazdy (gwałtowne hamowania i przyspieszenia) liczy się z prędkości GPS.

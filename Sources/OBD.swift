@@ -56,6 +56,8 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     @Published private(set) var readings: [Reading] = []
     /// Answers per second while values are being read.
     @Published private(set) var rate = 0.0
+    /// Trouble codes the car has stored, read once per connection. Never cleared by this app.
+    @Published private(set) var codes: [String] = []
     /// Everything exchanged with the adapter during set-up. Not published: it changes too often.
     private(set) var log: [String] = []
     /// Latest decoded values with the time each was read. Not published: `readings` drives the screen.
@@ -176,6 +178,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         finish(nil)
         info = []
         readings = []
+        codes = []
         car.clear()
         rate = 0
         state = .idle
@@ -193,6 +196,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         finish(nil)
         // Old values must not pass for current ones, on the screen or in a trip being recorded.
         readings = []
+        codes = []
         car.clear()
         rate = 0
         failedAt = Date()
@@ -447,6 +451,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             InfoRow(label: "Sterowniki, które odpowiedziały", value: units.joined(separator: ", ")),
             InfoRow(label: "Kody błędów", value: codesRead ? (codes.isEmpty ? "brak" : codes.joined(separator: ", ")) : "nie odczytano"),
         ]
+        self.codes = codes.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
         note("Obsługiwane parametry (\(dataPIDs.count)): " + hexString(dataPIDs))
         note("Koniec rozpoznania. Dalej tylko odczyt wartości na żywo (nie jest zapisywany w dzienniku).")
         if let peripheral {

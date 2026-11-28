@@ -523,6 +523,78 @@ func fuelRange(levelPercent: Double, tankLitres: Double, per100: Double) -> Doub
     return max(0, levelPercent) / 100 * tankLitres / per100 * 100
 }
 
+// MARK: Warnings from the car
+
+// Remembered figures, not measured on this car: tune against what a normal drive shows.
+let engineHotAt = 115.0     // °C of coolant
+let lowVoltsBelow = 12.0    // V with the engine running: the alternator is not charging
+let iceRiskAt = 3.0         // °C outside
+let iceRiskHysteresis = 2.0 // °C above that before the warning goes away
+
+func isIcy(outside: Double?, wasIcy: Bool) -> Bool {
+    guard let outside else { return false }
+    if outside <= iceRiskAt { return true }
+    return wasIcy && outside <= iceRiskAt + iceRiskHysteresis
+}
+
+/// True once a condition has held for `needed` separate readings in a row: one odd reading is not a warning.
+struct Confirmed {
+    private var count = 0
+    private var last: Date?
+
+    /// - holds: nil when there is no reading at all.
+    /// - readAt: when the reading was made; the same reading seen again does not count twice.
+    mutating func update(_ holds: Bool?, readAt: Date?, needed: Int = 2) -> Bool {
+        guard let holds, let readAt else {
+            count = 0
+            last = nil
+            return false
+        }
+        if readAt != last {
+            last = readAt
+            count = holds ? count + 1 : 0
+        }
+        return count >= needed
+    }
+}
+
+// MARK: Driving style (from GPS speed, so it works for every saved trip)
+
+// Tune against real drives.
+let harshBraking = 3.0       // m/s² (about 0.3 g)
+let harshAcceleration = 2.5  // m/s²
+let harshMaxGap = 3.0        // s between fixes that still count as one continuous measurement
+
+struct HarshEvent: Identifiable, Equatable {
+    let index: Int      // the fix where it began
+    let braking: Bool
+    var id: Int { index }
+}
+
+/// Places where the speed changed sharply over at least two fixes in a row. One sudden reading is
+/// a GPS glitch, not driving; a pause or a hole in the fixes never makes an event.
+func harshEvents(_ p: [TrackPoint]) -> [HarshEvent] {
+    var events: [HarshEvent] = []
+    var run = 0         // qualifying pairs in a row
+    var runBraking = false
+    for i in p.indices.dropFirst() {
+        let a = p[i - 1], b = p[i], dt = b.t.timeIntervalSince(a.t)
+        var harsh: Bool? // true = braking, false = accelerating, nil = neither
+        if dt > 0, dt <= harshMaxGap, a.seg == b.seg, let va = a.speed, let vb = b.speed {
+            let acceleration = (vb - va) / dt
+            if acceleration <= -harshBraking { harsh = true } else if acceleration >= harshAcceleration { harsh = false }
+        }
+        guard let harsh else {
+            run = 0
+            continue
+        }
+        run = harsh == runBraking ? run + 1 : 1
+        runBraking = harsh
+        if run == 2 { events.append(HarshEvent(index: i - 2, braking: harsh)) }
+    }
+    return events
+}
+
 // MARK: Recording with the engine
 
 let autoStopDelay = 120.0 // s with the engine off (or the adapter silent) and the car standing before a recording ends

@@ -410,6 +410,42 @@ let shortTrip = Trip(url: URL(fileURLWithPath: "/a.jsonl"), points: driven) // 2
 precondition(planningPer100([shortTrip], fallback: 7, correction: 1) == 7, "too little measured: the Settings figure")
 precondition(abs(planningPer100(Array(repeating: shortTrip, count: 30), fallback: 7, correction: 1.1) - 5.5) < 0.03)
 
+// Warnings: ice with hysteresis; a warning needs two separate readings in a row
+precondition(isIcy(outside: 3, wasIcy: false) && !isIcy(outside: 4, wasIcy: false) && isIcy(outside: 5, wasIcy: true))
+precondition(!isIcy(outside: 5.5, wasIcy: true) && !isIcy(outside: nil, wasIcy: true))
+var confirmed = Confirmed()
+let r1 = Date(timeIntervalSince1970: 10), r2 = Date(timeIntervalSince1970: 20), r3 = Date(timeIntervalSince1970: 30)
+precondition(!confirmed.update(true, readAt: r1) && !confirmed.update(true, readAt: r1), "the same reading does not count twice")
+precondition(confirmed.update(true, readAt: r2) && confirmed.update(true, readAt: r2))
+precondition(!confirmed.update(false, readAt: r3) && !confirmed.update(nil, readAt: nil))
+precondition(!confirmed.update(true, readAt: r1) && confirmed.update(true, readAt: r2), "starts over after it cleared")
+var timed = CarValues()
+timed.set(0x05, 90, at: r1)
+precondition(timed.time(0x05) == r1 && timed.time(0x0C) == nil)
+
+// Driving style: sharp changes of speed over two fixes in a row
+func speeds(_ v: [Double], seg: [Int: Int] = [:], gapAfter: Int? = nil) -> [TrackPoint] {
+    var t = 0.0
+    return v.enumerated().map { i, speed in
+        var p = pt(t, 52.0, 21.0, speed: speed)
+        p.seg = seg[i]
+        t += gapAfter == i ? 60 : 1
+        return p
+    }
+}
+precondition(harshEvents(speeds([20, 20, 16, 12, 8, 8])) == [HarshEvent(index: 1, braking: true)], "one stop is one event: \(harshEvents(speeds([20, 20, 16, 12, 8, 8])))")
+precondition(harshEvents(speeds([5, 8, 11, 14, 14])) == [HarshEvent(index: 0, braking: false)])
+precondition(harshEvents(speeds([20, 20, 5, 20, 20])).isEmpty, "a single odd fix is a glitch")
+precondition(harshEvents(speeds([20, 18, 16, 14, 12])).isEmpty, "ordinary braking")
+precondition(harshEvents(speeds([20, 16, 12, 12, 8, 4])).count == 2, "two separate stops")
+precondition(harshEvents(speeds([30, 30, 10, 0], gapAfter: 1)).isEmpty, "a hole in the fixes is not braking")
+precondition(harshEvents(speeds([30, 26, 0, 0], seg: [2: 1, 3: 1])).isEmpty && harshEvents([]).isEmpty, "nor is a pause")
+
+// Trouble codes: what they are about
+precondition(dtcArea("P0301").hasPrefix("zapłon") && dtcArea("P0171").hasPrefix("paliwo") && dtcArea("P0420").hasPrefix("emisja"))
+precondition(dtcArea("P1234").hasPrefix("kod producenta") && dtcArea("U0100").hasPrefix("komunikacja") && dtcArea("P0700") == "skrzynia biegów")
+precondition(dtcArea("C1123").hasPrefix("podwozie") && dtcArea("x") == "nieznany kod")
+
 // Recording with the engine
 var auto = AutoRecord()
 func autoStep(_ sec: Double, engine: Bool, moving: Bool = false, recording: Bool) -> AutoRecord.Action {

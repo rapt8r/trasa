@@ -26,6 +26,7 @@ enum Prefs {
     static let placeNames = "showPlaceNames"
     static let autoRecord = "autoRecord"     // start and stop recording with the engine
     static let tankLitres = "tankLitres"
+    static let seenCodes = "obdSeenCodes"    // trouble codes the user has already looked at
 }
 
 /// Screens pushed inside the bottom sheet.
@@ -243,15 +244,41 @@ struct SpeedLimitSign: View {
 /// Outside air temperature as the car's own sensor reports it, in the column of signs.
 struct OutsideTempSign: View {
     let celsius: Int
+    /// Cold enough for ice on the road: a warning triangle and a blue ring, not colour alone.
+    var icy = false
 
     var body: some View {
-        Text("\(celsius)°")
-            .font(.system(size: celsius <= -10 ? 22 : 26, weight: .bold, design: .rounded))
-            .monospacedDigit()
-            .frame(width: 66, height: 66) // the size of the limit sign above it
+        VStack(spacing: -2) {
+            if icy {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.orange)
+            }
+            Text("\(celsius)°")
+                .font(.system(size: celsius <= -10 ? 22 : 26, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        }
+        .frame(width: 66, height: 66) // the size of the limit sign above it
+        .background(.regularMaterial, in: Circle())
+        .overlay {
+            if icy { Circle().strokeBorder(.blue, lineWidth: 4) }
+        }
+        .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Temperatura na zewnątrz \(celsius) stopni" + (icy ? ". Możliwa gołoledź" : ""))
+    }
+}
+
+/// The car has stored trouble codes the user has not looked at yet. Goes away once the car screen is opened.
+struct CheckEngineSign: View {
+    var body: some View {
+        Image(systemName: "engine.combustion.fill")
+            .font(.system(size: 28, weight: .semibold))
+            .foregroundStyle(.orange)
+            .frame(width: 66, height: 66)
             .background(.regularMaterial, in: Circle())
             .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
-            .accessibilityLabel("Temperatura na zewnątrz \(celsius) stopni")
+            .accessibilityLabel("Auto ma zapisane kody błędów. Szczegóły na ekranie Samochód")
     }
 }
 
@@ -409,11 +436,24 @@ struct RecordView: View {
     @State private var lowFuel = false
     /// Kilometres the fuel should last, while it is low.
     @State private var fuelRangeKm: Int?
+    @State private var icy = false
+    @State private var hotCheck = Confirmed()
+    /// Coolant temperature while it is above `engineHotAt`.
+    @State private var hotEngine: Int?
+    @State private var voltsCheck = Confirmed()
+    /// System voltage while it is under `lowVoltsBelow` with the engine running.
+    @State private var lowVolts: Double?
+    @State private var newCodes = false
     // When GPS goes quiet nothing else would notice, so the fix's age is checked on a timer.
     private let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     /// The one message worth showing right now, most urgent first.
     private var notice: Notice? {
+        // The engine first: it must not be hidden by a GPS message in a tunnel.
+        if let hotEngine { return Notice(icon: "thermometer.high", text: "Wysoka temperatura silnika · \(hotEngine) °C") }
+        if let lowVolts {
+            return Notice(icon: "battery.25", text: String(format: "Niskie napięcie · %.1f V", locale: Locale.current, lowVolts))
+        }
         if recorder.denied { return nil } // the sheet explains that one and offers Settings
         if !recorder.isReplaying {
             switch gps {
@@ -450,7 +490,26 @@ struct RecordView: View {
         if range != fuelRangeKm { fuelRangeKm = range }
         stations.update(recorder.live, low: low)
 
-        // Recording with the engine. GPS speed tells a lost adapter on the road from a parked car.
+        let icyNow = isIcy(outside: car[0x46], wasIcy: icy)
+        if icyNow != icy { icy = icyNow }
+        // Engine warnings wait for two separate readings: these parameters are read once per rotation,
+        // and a false alarm mid-drive is worse than a late one.
+        let coolant = car[0x05]
+        let hot = hotCheck.update(coolant.map { $0 >= engineHotAt }, readAt: obd.car.time(0x05))
+        let hotNow = hot ? coolant.map { Int($0.rounded()) } : nil
+        if hotNow != hotEngine { hotEngine = hotNow }
+        let volts = (car[0x0C] ?? 0) >= engineRunningRPM ? car[0x42] : nil
+        let under = voltsCheck.update(volts.map { $0 < lowVoltsBelow }, readAt: obd.car.time(0x42), needed: 3)
+        let voltsNow = under ? volts : nil
+        if voltsNow != lowVolts { lowVolts = voltsNow }
+        let unseen = !obd.codes.isEmpty && obd.codes.joined(separator: ",") != UserDefaults.standard.string(forKey: Prefs.seenCodes)
+        if unseen != newCodes { newCodes = unseen }
+
+        refreshAutoRecord(car)
+    }
+
+    /// Recording with the engine. GPS speed tells a lost adapter on the road from a parked car.
+    private func refreshAutoRecord(_ car: [Int: Double]) {
         let moving = gps != .searching && (recorder.live?.speed ?? 0) * 3.6 >= DriveSheet.movingSpeed
         let action = autoRecord.update(engineRunning: (car[0x0C] ?? 0) >= engineRunningRPM, moving: moving,
                                        recording: recorder.isRecording, now: Date())
@@ -494,7 +553,7 @@ struct RecordView: View {
                         SpeedLimitSign(limit: limit, exceeded: over)
                     }
                     if let outsideTemp {
-                        OutsideTempSign(celsius: outsideTemp).transition(.scale.combined(with: .opacity))
+                        OutsideTempSign(celsius: outsideTemp, icy: icy).transition(.scale.combined(with: .opacity))
                     }
                     if let coldEngine {
                         ColdEngineSign(coolant: coldEngine).transition(.scale.combined(with: .opacity))
@@ -502,8 +561,13 @@ struct RecordView: View {
                     if lowFuel {
                         LowFuelSign(range: fuelRangeKm).transition(.scale.combined(with: .opacity))
                     }
+                    if newCodes {
+                        CheckEngineSign().transition(.scale.combined(with: .opacity))
+                    }
                 }
                 .padding(12)
+                .animation(.spring(duration: 0.45), value: newCodes)
+                .animation(.spring(duration: 0.45), value: icy)
                 .animation(.spring(duration: 0.45), value: coldEngine != nil)
                 .animation(.spring(duration: 0.45), value: lowFuel)
                 .animation(.spring(duration: 0.45), value: outsideTemp != nil)
@@ -516,6 +580,8 @@ struct RecordView: View {
             .sensoryFeedback(.impact(weight: .light), trigger: recorder.isPaused)
             .sensoryFeedback(trigger: over) { _, isOver in isOver ? .warning : nil }
             .sensoryFeedback(trigger: lowFuel) { _, isLow in isLow ? .warning : nil }
+            .sensoryFeedback(trigger: icy) { _, isIcy in isIcy ? .warning : nil }
+            .sensoryFeedback(trigger: hotEngine != nil || lowVolts != nil) { _, isOn in isOn ? .error : nil }
             .preferredColorScheme(night ? .dark : nil)
             .onAppear {
                 recorder.requestPermission()
@@ -1155,6 +1221,22 @@ struct CarView: View {
                 }
             }
 
+            if !obd.codes.isEmpty {
+                Section {
+                    ForEach(obd.codes, id: \.self) { code in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(code).font(.headline).monospaced()
+                            Text(dtcArea(code)).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                } header: {
+                    Text("Zapisane kody błędów")
+                } footer: {
+                    Text("Kod wskazuje obwód, który zgłosił problem, a nie część do wymiany. Journey niczego nie kasuje: kod zniknie po naprawie albo skasowaniu testerem.")
+                }
+            }
+
             if !obd.readings.isEmpty {
                 Section {
                     ForEach(obd.readings) { reading in
@@ -1179,6 +1261,10 @@ struct CarView: View {
         .contentMargins(.top, 8, for: .scrollContent)
         .navigationTitle("Samochód")
         .navigationBarTitleDisplayMode(.inline)
+        // Looked at: the sign on the map goes away until the car reports a different set of codes.
+        .onChange(of: obd.codes, initial: true) {
+            if !obd.codes.isEmpty { UserDefaults.standard.set(obd.codes.joined(separator: ","), forKey: Prefs.seenCodes) }
+        }
     }
 
     @ViewBuilder
@@ -1343,6 +1429,7 @@ struct TripDetailView: View {
     @State private var rpmSeries: [CarPoint] = []
     @State private var fuelSeries: [CarPoint] = []
     @State private var coolantSeries: [CarPoint] = []
+    @State private var events: [HarshEvent] = []
     @State private var satellite = false
     @State private var confirmDelete = false
     @AppStorage(Prefs.placeNames) private var showPlaceNames = true
@@ -1441,6 +1528,18 @@ struct TripDetailView: View {
                         Marker("Start", systemImage: "flag.fill", coordinate: first.coordinate).tint(.green)
                         Marker("Koniec", systemImage: "flag.checkered", coordinate: last.coordinate).tint(.red)
                     }
+                    ForEach(events.filter { $0.index < trip.points.count }) { event in
+                        Annotation(event.braking ? "Gwałtowne hamowanie" : "Gwałtowne przyspieszenie",
+                                   coordinate: trip.points[event.index].coordinate) {
+                            Image(systemName: event.braking ? "exclamationmark" : "bolt.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(event.braking ? Color.red : Color.orange, in: Circle())
+                                .overlay(Circle().strokeBorder(.white, lineWidth: 1.5))
+                        }
+                        .annotationTitles(.hidden)
+                    }
                 }
                 .mapStyle(satellite ? .hybrid(elevation: .realistic) : .standard(elevation: .realistic, pointsOfInterest: .excludingAll))
                 .frame(height: 270)
@@ -1534,6 +1633,20 @@ struct TripDetailView: View {
                     }
                 }
 
+                Card(title: "Styl jazdy") {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
+                        GridRow {
+                            Metric(label: "Gwałtowne hamowania", value: "\(events.filter(\.braking).count)")
+                            Metric(label: "Gwałtowne przyspieszenia", value: "\(events.filter { !$0.braking }.count)")
+                        }
+                    }
+                    Text(events.isEmpty
+                         ? "Płynna jazda: bez gwałtownych zmian prędkości."
+                         : "Miejsca są zaznaczone na mapie: czerwony wykrzyknik to hamowanie, pomarańczowa błyskawica to przyspieszenie.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 if car.samples > 0 { carCards(car) }
 
                 Card(title: "Prędkość") {
@@ -1584,6 +1697,7 @@ struct TripDetailView: View {
             // Thinned once, not on every redraw.
             rpmSeries = carSeries(trip.points) { $0[0x0C] }
             fuelSeries = carSeries(trip.points, fuelRate)
+            events = harshEvents(trip.points)
             coolantSeries = carSeries(trip.points) { $0[0x05] }
         }
         .confirmationDialog("Usunąć tę trasę?", isPresented: $confirmDelete, titleVisibility: .visible) {
