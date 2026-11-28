@@ -208,6 +208,8 @@ func pollRound(_ live: [UInt8], round: Int) -> [UInt8] {
 }
 
 let carValueMaxAge = 5.0 // s; an older reading is not saved with a fix any more
+let carStaleAfter = 90.0 // s; a parameter not read for this long (the car stopped answering it) is not shown or warned about
+let maxTroubleCodes = 32 // more than any car stores; a faulty adapter cannot make the list grow without end
 
 /// The latest decoded value of each parameter (keyed by its number) with the time it was read.
 struct CarValues {
@@ -227,6 +229,11 @@ struct CarValues {
 
     /// When the current value of a parameter was read.
     func time(_ pid: UInt8) -> Date? { times[Int(pid)] }
+
+    /// The values read within the last `maxAge` seconds: what signs and warnings may rely on.
+    func current(at now: Date, maxAge: Double = carStaleAfter) -> [Int: Double] {
+        values.filter { now.timeIntervalSince(times[$0.key] ?? .distantPast) <= maxAge }
+    }
 
     /// Readings made since the last call, for the trip file: each is saved once, and never a stale one.
     mutating func take(at now: Date) -> [Int: Double]? {

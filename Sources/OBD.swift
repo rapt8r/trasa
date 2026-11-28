@@ -451,7 +451,7 @@ final class OBDAdapter: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             InfoRow(label: "Sterowniki, które odpowiedziały", value: units.joined(separator: ", ")),
             InfoRow(label: "Kody błędów", value: codesRead ? (codes.isEmpty ? "brak" : codes.joined(separator: ", ")) : "nie odczytano"),
         ]
-        self.codes = codes.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+        self.codes = codes.prefix(maxTroubleCodes).reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
         note("Obsługiwane parametry (\(dataPIDs.count)): " + hexString(dataPIDs))
         note("Koniec rozpoznania. Dalej tylko odczyt wartości na żywo (nie jest zapisywany w dzienniku).")
         if let peripheral {

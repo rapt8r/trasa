@@ -422,6 +422,8 @@ precondition(!confirmed.update(true, readAt: r1) && confirmed.update(true, readA
 var timed = CarValues()
 timed.set(0x05, 90, at: r1)
 precondition(timed.time(0x05) == r1 && timed.time(0x0C) == nil)
+timed.set(0x0C, 800, at: r3)
+precondition(timed.current(at: r3, maxAge: 15) == [0x0C: 800] && timed.current(at: r3, maxAge: 25) == [0x0C: 800, 0x05: 90], "a parameter not read lately is not current")
 
 // Driving style: sharp changes of speed over two fixes in a row
 func speeds(_ v: [Double], seg: [Int: Int] = [:], gapAfter: Int? = nil) -> [TrackPoint] {

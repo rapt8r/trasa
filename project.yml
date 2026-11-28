@@ -14,7 +14,7 @@ targets:
       properties:
         CFBundleDisplayName: Journey
         CFBundleShortVersionString: "1.19"
-        CFBundleVersion: "21"
+        CFBundleVersion: "22"
         CFBundleDevelopmentRegion: pl
         UILaunchScreen: {}
         NSLocationWhenInUseUsageDescription: Aplikacja zapisuje trasę przejazdu, także gdy ekran jest wyłączony.
