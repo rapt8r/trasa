@@ -366,7 +366,7 @@ struct CarGauges: View {
     @AppStorage(Prefs.fuelCorrection) private var fuelCorrection = 1.0
 
     var body: some View {
-        let car = obd.car.current(at: Date())
+        let car = obd.car.shown(at: Date())
         let fuel = liveConsumption(car, correction: fuelCorrection)
         if obd.state == .ready, !obd.readings.isEmpty, fuel != nil || car[0x0C] != nil {
             VStack(alignment: .trailing, spacing: 2) {
@@ -472,7 +472,7 @@ struct RecordView: View {
         // A remembered adapter is retried while the app is in use; never from a suspended app.
         if scenePhase == .active || recorder.isRecording { obd.autoConnect() }
         // Only what was read lately: a parameter the car stopped answering must not hold a sign or a warning up.
-        let car = obd.car.current(at: Date())
+        let car = obd.car.shown(at: Date())
         var cold: Int?
         if let rpm = car[0x0C], rpm >= engineRunningRPM, let coolant = car[0x05], coolant < engineColdBelow {
             cold = Int(coolant.rounded())

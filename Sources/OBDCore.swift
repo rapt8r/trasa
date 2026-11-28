@@ -210,6 +210,7 @@ func pollRound(_ live: [UInt8], round: Int) -> [UInt8] {
 let carValueMaxAge = 5.0 // s; an older reading is not saved with a fix any more
 let carStaleAfter = 90.0 // s; a parameter not read for this long (the car stopped answering it) is not shown or warned about
 let carStaleRounds = 3.0 // ...or for this many of its own reading intervals, whichever is longer: a slow adapter takes long to come round
+let carStaleLimit = 300.0 // s; however slow the adapter, nothing older than this is shown
 let maxTroubleCodes = 32 // more than any car stores; a faulty adapter cannot make the list grow without end
 
 /// The latest decoded value of each parameter (keyed by its number) with the time it was read.
@@ -235,11 +236,18 @@ struct CarValues {
     /// When the current value of a parameter was read.
     func time(_ pid: UInt8) -> Date? { times[Int(pid)] }
 
+    /// The values read within the last `maxAge` seconds, strictly: for what must never lag (the speedometer).
+    func current(at now: Date, maxAge: Double) -> [Int: Double] {
+        values.filter { now.timeIntervalSince(times[$0.key] ?? .distantPast) <= maxAge }
+    }
+
     /// The values still being read: what signs and warnings may rely on. A value counts while it is
-    /// younger than `maxAge`, or than a few of its own reading intervals when the adapter is slow.
-    func current(at now: Date, maxAge: Double = carStaleAfter) -> [Int: Double] {
+    /// younger than `carStaleAfter`, or than a few of its own reading intervals when the adapter is
+    /// slow, but never beyond `carStaleLimit`.
+    func shown(at now: Date) -> [Int: Double] {
         values.filter {
-            now.timeIntervalSince(times[$0.key] ?? .distantPast) <= max(maxAge, (intervals[$0.key] ?? 0) * carStaleRounds)
+            let allowed = min(carStaleLimit, max(carStaleAfter, (intervals[$0.key] ?? 0) * carStaleRounds))
+            return now.timeIntervalSince(times[$0.key] ?? .distantPast) <= allowed
         }
     }
 

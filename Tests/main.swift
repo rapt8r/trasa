@@ -427,9 +427,12 @@ precondition(timed.current(at: r3, maxAge: 15) == [0x0C: 800] && timed.current(a
 // A slow adapter: coolant comes round every 100 s, so it is still current 250 s after the last reading, not after 400
 var slow = CarValues()
 slow.set(0x05, 118, at: Date(timeIntervalSince1970: 0))
-precondition(slow.current(at: Date(timeIntervalSince1970: 95)).isEmpty, "one reading only: the plain limit")
+precondition(slow.shown(at: Date(timeIntervalSince1970: 95)).isEmpty, "one reading only: the plain limit")
 slow.set(0x05, 119, at: Date(timeIntervalSince1970: 100))
-precondition(slow.current(at: Date(timeIntervalSince1970: 350)) == [0x05: 119] && slow.current(at: Date(timeIntervalSince1970: 500)).isEmpty)
+precondition(slow.shown(at: Date(timeIntervalSince1970: 350)) == [0x05: 119] && slow.shown(at: Date(timeIntervalSince1970: 500)).isEmpty)
+precondition(slow.current(at: Date(timeIntervalSince1970: 110), maxAge: 5).isEmpty, "the strict limit is never stretched: the speedometer falls back to GPS")
+slow.set(0x05, 119, at: Date(timeIntervalSince1970: 1100)) // a stall of a quarter of an hour
+precondition(slow.shown(at: Date(timeIntervalSince1970: 1390)) == [0x05: 119] && slow.shown(at: Date(timeIntervalSince1970: 1410)).isEmpty, "capped at carStaleLimit")
 
 // Driving style: sharp changes of speed over two fixes in a row
 func speeds(_ v: [Double], seg: [Int: Int] = [:], gapAfter: Int? = nil) -> [TrackPoint] {
