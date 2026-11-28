@@ -445,8 +445,10 @@ struct RecordView: View {
     /// System voltage while it is under `lowVoltsBelow` with the engine running.
     @State private var lowVolts: Double?
     @State private var newCodes = false
-    // When GPS goes quiet nothing else would notice, so the fix's age is checked on a timer.
-    private let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    // When GPS goes quiet nothing else would notice, so the fix's age and the car are checked on a timer.
+    // Static: this view is created anew with every GPS fix, and a timer of its own would start over
+    // each second and never fire.
+    private static let statusTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     /// The one message worth showing right now, most urgent first.
     private var notice: Notice? {
@@ -544,7 +546,7 @@ struct RecordView: View {
                 }
             }
             .animation(.spring(duration: 0.45), value: notice)
-            .onReceive(statusTimer) { _ in
+            .onReceive(Self.statusTimer) { _ in
                 refreshGPS()
                 refreshCar()
             }
@@ -609,6 +611,7 @@ struct RecordView: View {
                 let dark = isNight(lat: p.lat, lon: p.lon, date: p.t)
                 if dark != night { night = dark }
                 refreshGPS()
+                refreshCar() // with every fix as well, so nothing here depends on the timer alone
             }
             .onChange(of: recorder.replayRate) { motion.rate = recorder.isReplaying ? recorder.replayRate : 1 }
             .onChange(of: recorder.isReplaying) {
@@ -1410,6 +1413,13 @@ struct SettingsView: View {
             } footer: {
                 Text("Trasy są podpisane miejscowościami, np. „Rylsk → Rawa Mazowiecka”. Nazwy podają Mapy Apple na podstawie początku i końca trasy zaokrąglonych do ok. 1 km. Po usunięciu trasy jej nazwa też znika.")
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            // Which build is installed: the first thing to check when something described is not there.
+            Text("Journey \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 6)
         }
         .navigationTitle("Ustawienia")
         .navigationBarTitleDisplayMode(.inline)
